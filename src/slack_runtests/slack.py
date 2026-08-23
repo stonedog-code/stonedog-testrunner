@@ -53,6 +53,19 @@ log = logging.getLogger(__name__)
 #: workflow and the tests, so there is exactly one default in the system.
 DEFAULT_CHANNEL = "#testing"
 
+#: Where the Web API lives. Overridable so a test can point it at a local fake.
+#:
+#: A hard-coded vendor URL is untestable by construction: the only way to prove
+#: what this actually puts on the wire — the JSON body, the bearer header, the
+#: method — is to let something local receive it. The unit tests stub `fetch`
+#: and assert on what was handed to the stub, which proves the CALL SITE and
+#: nothing about the request.
+#:
+#: Read at call time, never captured at import, for the same reason the token is.
+def _slack_api() -> str:
+    return os.environ.get("SLACK_API_BASE", "https://slack.com/api").rstrip("/")
+
+
 SLACK_API = "https://slack.com/api"
 
 #: chat.update is rate limited PER METHOD PER APP. A 500-test suite editing once
@@ -196,7 +209,7 @@ class SlackNotifier:
         has not run `uv sync` — the console path must work from anywhere.
         """
         request = urllib.request.Request(
-            f"{SLACK_API}/{method}",
+            f"{_slack_api()}/{method}",
             data=json.dumps(payload).encode(),
             headers={
                 "Content-Type": "application/json; charset=utf-8",
