@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 
 from slack_runtests import identity
+from slack_runtests.authz import refuse_or_warn
 
 from .config import load
 
@@ -38,14 +40,31 @@ def main() -> int:
     log = logging.getLogger("edge")
     cfg = load()
 
+    # BEFORE ANYTHING TOUCHES THE DISK. `identity.load_or_create` GENERATES a
+    # keypair when none exists, so running it first meant a process that was
+    # about to refuse to start still wrote a private key — a side effect from a
+    # run that was rejected, and a key an operator would later have to reason
+    # about. A gate belongs above the side effects it is gating.
+    refusal = refuse_or_warn(
+        log,
+        signing_secret=cfg.signing_secret,
+        allowed_team=cfg.allowed_team,
+        allowed_channels=cfg.allowed_channels,
+        allowed_users=cfg.allowed_users,
+        # The app's lifespan does the announcing; it runs whichever way this
+        # process was started, so warning here too would print it twice.
+        warn=False,
+    )
+    if refusal is not None:
+        print(refusal, file=sys.stderr)
+        return 2
+
     # Print the edge's own fingerprint at startup. This is what an operator
     # compares against the value pinned in each test server's config, and it is
     # far easier to check a line of log output than to go and read a key file.
     key = identity.load_or_create(cfg.key_path)
     log.info("edge identity %s (key %s)", identity.fingerprint(identity.public_b64(key)), cfg.key_path)
 
-    if not cfg.signing_secret:
-        log.warning("SLACK_SIGNING_SECRET unset — Slack requests will be accepted UNVERIFIED")
     if cfg.enroll_token:
         log.warning("RUNNER_ENROLL_TOKEN is set — unknown test servers can self-enrol")
     if not cfg.admin_token:

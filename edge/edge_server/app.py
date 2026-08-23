@@ -33,10 +33,13 @@ import logging
 import time
 import uuid
 
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response
 
 from slack_runtests import gate, identity
+from slack_runtests.authz import refuse_or_warn
 from slack_runtests.store import EnqueueResult, Job, JobStore, StoreBusy, open_store
 
 from . import auth
@@ -44,7 +47,44 @@ from .config import EdgeConfig, load
 
 log = logging.getLogger(__name__)
 
-app = FastAPI(title="slack-runtests-edge")
+
+@asynccontextmanager
+async def _startup_gate(app: FastAPI):
+    """The refusal, where NO launcher can go around it.
+
+    `__main__` performs the same check and prints a readable message, but
+    `uvicorn {module}:app` is an entirely ordinary way to start a FastAPI
+    process — it is what most Docker images do, and it never touches
+    `__main__`. A control that is bypassed by choosing a different launcher is
+    not a control; the integration tier here starts uvicorn exactly that way,
+    and its passing unchanged is what showed the gap.
+
+    One decision (`refuse_or_warn`), two call sites, on purpose.
+    """
+    cfg = getattr(app.state, "config", None) or load()
+    app.state.config = cfg
+    refusal = refuse_or_warn(
+        log,
+        signing_secret=cfg.signing_secret,
+        allowed_team=cfg.allowed_team,
+        allowed_channels=cfg.allowed_channels,
+        allowed_users=cfg.allowed_users,
+    )
+    if refusal is not None:
+        # LOGGED, then raised with one line. Raising the whole block gets it
+        # wrapped in a Python traceback, which buries the part an operator
+        # needs — the list of what to set — inside stack frames that tell them
+        # nothing. The traceback still happens; it just no longer carries the
+        # message that deserved to be read.
+        for line in refusal.splitlines():
+            log.critical("%s", line)
+        raise RuntimeError(
+            "refusing to start: required Slack protections are not configured "
+            "(see the lines above)"
+        )
+    yield
+
+app = FastAPI(title="slack-runtests-edge", lifespan=_startup_gate)
 
 #: How often a parked long-poll re-checks the queue. Small enough that a job
 #: reaches an idle test server in well under a second; large enough that three

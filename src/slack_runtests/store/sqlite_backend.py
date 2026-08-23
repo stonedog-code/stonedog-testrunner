@@ -25,6 +25,7 @@ WHAT SQLITE GIVES AND WHAT IT COSTS
 from __future__ import annotations
 
 import sqlite3
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterable, Iterator
@@ -101,9 +102,7 @@ class SqliteStore(JobStore):
         if str(self.path) != ":memory:":
             self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._conn() as conn:
-            # WAL so a long-polling reader never blocks the writer that is
-            # trying to enqueue a job from the Slack handler.
-            conn.execute("PRAGMA journal_mode=WAL")
+            self._enable_wal(conn)
             # `executescript` issues its own COMMIT, so it cannot run inside an
             # explicit transaction. That is fine: every statement in SCHEMA is
             # `IF NOT EXISTS`, and SQLite takes the write lock per statement, so
@@ -119,6 +118,47 @@ class SqliteStore(JobStore):
         # this whole store exists to fix.
         with self._txn() as conn:
             self._migrate(conn)
+
+    def _enable_wal(self, conn: sqlite3.Connection) -> None:
+        """WAL, tolerating another process setting it at the same moment.
+
+        WAL is what stops a long-polling reader blocking the writer that is
+        trying to enqueue a job from the Slack handler. Getting there is the
+        awkward part: **`PRAGMA journal_mode` can return SQLITE_BUSY without
+        ever invoking the busy handler**, so neither `timeout=` nor
+        `PRAGMA busy_timeout` covers it. Six processes opening one database
+        together will sometimes see one of them fail — measured, as a flaky
+        test rather than reasoned about.
+
+        The right response is not to raise. Journal mode is a property of the
+        FILE, not of this connection: if a concurrent opener has already set
+        WAL, there is nothing left to do and failing would refuse to start a
+        process whose database is in exactly the state it wanted.
+        """
+        deadline = time.monotonic() + self.busy_timeout
+        while True:
+            try:
+                row = conn.execute("PRAGMA journal_mode=WAL").fetchone()
+                if row is not None and str(row[0]).lower() == "wal":
+                    return
+            except sqlite3.OperationalError as exc:
+                if not _is_busy(exc):
+                    raise
+                # Somebody else holds the lock. They are setting it to the same
+                # value, so read it back before deciding this failed.
+                try:
+                    current = conn.execute("PRAGMA journal_mode").fetchone()
+                    if current is not None and str(current[0]).lower() == "wal":
+                        return
+                except sqlite3.OperationalError:
+                    pass
+                if time.monotonic() >= deadline:
+                    raise
+            if time.monotonic() >= deadline:
+                raise sqlite3.OperationalError(
+                    "database is locked: could not enable WAL journal mode"
+                )
+            time.sleep(0.02)
 
     def _migrate(self, conn: sqlite3.Connection) -> None:
         for table, column, statement in _MIGRATIONS:

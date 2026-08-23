@@ -49,15 +49,56 @@ else.
 
 | Variable | Default | What it does |
 |---|---|---|
-| `SLACK_SIGNING_SECRET` | *(empty)* | **Set this.** Empty means every Slack request is accepted **unverified**, with a warning logged on each one. That is how `test.sh` works out of the box; it is not a deployment setting. |
-| `SLACK_TEAM_ID` | *(empty)* | Pin the workspace. A valid Slack signature only proves the request came from *Slack* — this is what proves it came from *your* Slack. |
-| `RUNTESTS_CHANNELS` | *(empty)* | Comma-separated channel ids allowed to run tests. |
+| `SLACK_SIGNING_SECRET` | *(empty)* | **Required.** Empty means every Slack request is accepted **unverified** — the edge refuses to start without it. |
+| `SLACK_TEAM_ID` | *(empty)* | **Required.** Pin the workspace. A valid Slack signature only proves the request came from *Slack* — this is what proves it came from *your* Slack. |
+| `RUNTESTS_CHANNELS` | *(empty)* | Comma-separated channel ids allowed to run tests. **One of this or `RUNTESTS_USERS` is required.** |
 | `RUNTESTS_USERS` | *(empty)* | Comma-separated user ids allowed to run tests. |
 | `SLACK_DEFAULT_CHANNEL` | `#testing` | Where results go if the payload carries no channel. |
+| `RUNTESTS_INSECURE_DEV` | *(empty)* | Start anyway with all of the above absent. **Local development only.** Warns, on every start, naming each protection it is ignoring. |
 
-The last three are empty by default, which means **no restriction**. On any real
-team the workspace contains guests, contractors and Slack Connect users from a
-customer, so leaving them empty is a decision, not a default to inherit.
+### The edge refuses to start without them
+
+**An empty allowlist used to mean "allow everyone".** The check read
+`if allowed_channels and ...`, so an empty set was falsy and skipped — the
+opposite of what an empty allowlist looks like it means, and nothing anywhere
+said so. A deployment that forgot these accepted a slash command from any
+workspace, any channel and any user who could reach the URL.
+
+So the process now refuses to start unless it is genuinely protecting
+something, and says exactly what is missing:
+
+```
+REFUSING TO START: this process would answer the internet without protecting anything.
+
+3 required setting(s) are missing:
+
+  · SLACK_SIGNING_SECRET — without it every request is accepted unverified, so
+    nothing proves a command came from Slack at all
+  · SLACK_TEAM_ID — a valid signature proves a request came from Slack, not that
+    it came from your workspace
+  · RUNTESTS_CHANNELS or RUNTESTS_USERS (at least one) — workspace membership is
+    not an entitlement; a workspace contains guests, contractors and Slack
+    Connect users from a customer
+```
+
+Channels **or** users, not both: a small team may reasonably allow any channel
+and restrict people, or the reverse, and a rule demanding both is one people
+work around rather than follow.
+
+**One escape hatch, and it is deliberately uncomfortable to write in a
+deployment.** `RUNTESTS_INSECURE_DEV=1` starts the process with every protection
+absent and warns on every start, naming each one. `bash run.sh` sets it for you
+locally and prints that it did; no image in this repo sets it. It is one
+variable rather than one per check on purpose — three separate opt-outs would be
+taken one at a time, each for a good local reason, arriving at the same place
+without anyone ever making the decision.
+
+**It cannot be bypassed by choosing a different launcher.** The check runs in
+the app's own lifespan as well as in `main()`, because `uvicorn
+edge_server.app:app` is an entirely ordinary way to start a FastAPI process and
+never touches `main()`. That gap was real: this repo's integration tier starts
+the edge exactly that way, and the first version of the gate did not apply to it
+at all.
 
 ### The test-server door
 
@@ -176,8 +217,9 @@ Every `/runner/*` **reply** carries `X-Edge-Timestamp` and `X-Edge-Signature`.
 
 ## Known limits
 
-- With no `SLACK_SIGNING_SECRET` the edge accepts unverified requests and warns
-  on every one. Deliberate, documented, and refused as soon as a secret is set.
+- With `RUNTESTS_INSECURE_DEV` set the edge accepts unverified requests and
+  applies no allowlist. That is the lab mode described above; without it the
+  process refuses to start rather than serving unprotected.
 - SQLite is right for one edge process and a handful of test servers, and it is
   the default for exactly that reason. **Set `EDGE_DB_DSN` when the process has
   no durable disk** — a container service with no persistent volume deletes the

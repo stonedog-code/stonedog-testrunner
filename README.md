@@ -211,8 +211,44 @@ here; **authorisation is the work.**
 | Build argv as a **list**, never `shell=True` | `runners/local.py` |
 | Map every workflow input through `env:` | `runtests.yml` |
 | Idempotent dispatch keyed on `trigger_id` | `api.py` |
+| **Refuse to start** when none of the above is configured | `authz.py` |
 | `concurrency:` cap — a slash command is a free trigger for an expensive job | `runtests.yml` |
 | Summaries only; detail to the artifact | `slack.py` |
+
+### An empty allowlist used to mean "allow everyone"
+
+The three authorisation checks were written like this:
+
+```python
+if allowed_channels and form.get("channel_id") not in allowed_channels:
+```
+
+An empty set is falsy, so the check was **skipped** — the opposite of what an
+empty allowlist looks like it means. The same was true of the signing secret:
+with none set, every request was accepted unverified and a warning was logged
+per request. Both were deliberate development affordances and both were
+documented; what was missing is the other half, something that distinguishes
+*"this is a lab"* from *"somebody deployed this and forgot"*. A per-request
+warning in a log nobody reads is not that.
+
+**So the process refuses to start unless it is protecting something**, and names
+everything that is absent in one message rather than one per restart. The escape
+hatch is a single variable meant to be uncomfortable in a production
+configuration file:
+
+```
+RUNTESTS_INSECURE_DEV=1
+```
+
+One flag rather than one per affordance, because they are not three independent
+decisions — they are one statement about what this process is. `bash run.sh`
+sets it locally and prints that it did; no image in this repo sets it.
+
+**The check runs in the app's lifespan, not only in `main()`**, because `uvicorn
+slack_runtests.api:app` never touches `main()` and is what most Docker images
+do. That gap was not hypothetical: this repo's own integration tier launches the
+edge that way, and it went straight around the first version of the gate — which
+is how the gap was found.
 
 **`prod` is deliberately not a valid server.** If a production run must exist,
 put it behind a GitHub Actions environment with required reviewers, so the
@@ -300,10 +336,11 @@ fix is a transaction-scoped advisory lock taken only when a cap is configured.
 
 Stated plainly rather than left to be discovered:
 
-- **With no `SLACK_SIGNING_SECRET` the server accepts unverified requests**, and
-  logs a warning on every one. That is how `test.sh` works out of the box. It is
-  refused as soon as a secret *is* set, so the insecure path cannot survive into
-  a configured deployment — but a real service should not have it at all.
+- **`RUNTESTS_INSECURE_DEV` exists at all.** With it set the server accepts
+  unverified requests and applies no allowlist, which is how `test.sh` works out
+  of the box. Without it the process refuses to start rather than serving
+  unprotected, so the insecure path cannot be entered by omission — but a real
+  service should not have the affordance at all.
 - **V1 parses counts out of pytest's stdout.** The real implementation is the
   reporter plugin on the nehsa.net page, which hooks pytest and gets exact
   numbers. Unparseable output yields zeros rather than a wrong number, and the
