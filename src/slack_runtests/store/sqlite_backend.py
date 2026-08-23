@@ -100,11 +100,24 @@ class SqliteStore(JobStore):
         self.busy_timeout = busy_timeout
         if str(self.path) != ":memory:":
             self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self._connect() as conn:
+        with self._conn() as conn:
             # WAL so a long-polling reader never blocks the writer that is
             # trying to enqueue a job from the Slack handler.
             conn.execute("PRAGMA journal_mode=WAL")
+            # `executescript` issues its own COMMIT, so it cannot run inside an
+            # explicit transaction. That is fine: every statement in SCHEMA is
+            # `IF NOT EXISTS`, and SQLite takes the write lock per statement, so
+            # a second process starting at the same moment sees the table and
+            # does nothing.
             conn.executescript(SCHEMA)
+        # THE MIGRATION IS THE PART THAT NEEDS A LOCK. It reads `PRAGMA
+        # table_info` and then decides whether to ALTER, and two processes
+        # starting together both read "no dispatch_mode" and both alter — the
+        # loser dying with `duplicate column name` at boot. `BEGIN IMMEDIATE`
+        # makes the read and the write one step. Two workers against one file is
+        # not a corner case here: it is the deployment whose per-worker state
+        # this whole store exists to fix.
+        with self._txn() as conn:
             self._migrate(conn)
 
     def _migrate(self, conn: sqlite3.Connection) -> None:
@@ -247,12 +260,19 @@ class SqliteStore(JobStore):
                     return refusal
 
             started = now if state == RUNNING else None
-            conn.execute(
-                f"INSERT INTO jobs ({_JOB_COLUMNS}, started_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            # OR IGNORE rather than a bare INSERT, so the PRIMARY KEY is the
+            # thing that decides duplication and the `SELECT 1` above is only a
+            # nicety. `BEGIN IMMEDIATE` already makes the two atomic here, but
+            # writing it the same way as the Postgres backend means the two
+            # cannot drift — and it is the Postgres one where the check-then-act
+            # was a real defect.
+            cur = conn.execute(
+                f"INSERT OR IGNORE INTO jobs ({_JOB_COLUMNS}, started_at) "
+                f"VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                 (job.id, job.product, job.server, job.select_expr, job.marker,
                  job.slack_channel, job.slack_user, now, state, mode, started),
             )
-            return EnqueueResult.ACCEPTED
+            return EnqueueResult.ACCEPTED if cur.rowcount == 1 else EnqueueResult.DUPLICATE
 
     def claim(self, runner_id: str, labels: Iterable[str], lease_seconds: float,
               max_attempts: int, *, caps: Caps = NO_CAPS,

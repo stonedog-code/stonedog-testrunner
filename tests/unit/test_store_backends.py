@@ -151,3 +151,56 @@ def test_an_existing_database_gains_the_new_column_without_an_operator(tmp_path)
         assert store.claim("runner-1", [], 60, 3) is not None
     finally:
         store.close()
+
+
+def test_two_processes_can_open_one_database_at_the_same_moment(tmp_path) -> None:
+    """Opening the store migrates it, and two workers open it together.
+
+    The migration reads `PRAGMA table_info` and then decides whether to ALTER.
+    Read outside a transaction, two openers both see the column missing and both
+    alter it — and the loser dies with `duplicate column name` at boot, before
+    it has served anything. Two workers against one file is not a corner case
+    here: it is the deployment whose per-worker state this store exists to fix.
+    """
+    path = tmp_path / "edge.db"
+    legacy = sqlite3.connect(path, isolation_level=None)
+    legacy.executescript(
+        "CREATE TABLE jobs (id TEXT PRIMARY KEY, product TEXT NOT NULL, "
+        "server TEXT NOT NULL, select_expr TEXT, marker TEXT, "
+        "slack_channel TEXT NOT NULL, slack_user TEXT NOT NULL, "
+        "created_at REAL NOT NULL, state TEXT NOT NULL, runner_id TEXT, "
+        "lease_expires REAL, attempts INTEGER NOT NULL DEFAULT 0, "
+        "started_at REAL, finished_at REAL, exit_code INTEGER, passed INTEGER, "
+        "failed INTEGER, skipped INTEGER, duration REAL, summary TEXT);"
+    )
+    legacy.close()
+
+    ready = threading.Barrier(6, timeout=30)
+    opened: list[SqliteStore] = []
+    errors: list[str] = []
+    lock = threading.Lock()
+
+    def open_it() -> None:
+        ready.wait()
+        try:
+            store = SqliteStore(path, busy_timeout=5)
+        except Exception as exc:  # noqa: BLE001 - the point is that there are none
+            with lock:
+                errors.append(f"{type(exc).__name__}: {exc}")
+            return
+        with lock:
+            opened.append(store)
+
+    threads = [threading.Thread(target=open_it) for _ in range(6)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+
+    try:
+        assert errors == [], f"an opener crashed at startup: {errors}"
+        assert len(opened) == 6
+        assert opened[0].job("nothing") is None
+    finally:
+        for store in opened:
+            store.close()

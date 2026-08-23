@@ -78,6 +78,48 @@ def test_a_dispatched_run_is_never_requeued_by_the_reaper(
     assert store.claim("runner-1", [], 60, 3, now=99_001.0) is None
 
 
+def test_simultaneous_retries_of_one_command_do_not_raise(
+    store: JobStore, make_job
+) -> None:
+    """Slack does not retry politely one at a time, and neither does this test.
+
+    NO CAPS on purpose. Idempotency must not depend on a cap being configured —
+    the Postgres backend originally serialised `_insert` with an advisory lock
+    taken only when a cap was set, so turning caps off silently turned this
+    guarantee off with them.
+
+    Found by review and reproduced before it was fixed: eight simultaneous
+    identical enqueues gave one `accepted` and SEVEN unhandled UniqueViolations,
+    every one of which is a 500 on the exact path idempotency exists for.
+    """
+    ready = threading.Barrier(8, timeout=30)
+    outcomes: list[EnqueueResult] = []
+    errors: list[str] = []
+    lock = threading.Lock()
+
+    def retry() -> None:
+        ready.wait()
+        try:
+            outcome = store.enqueue(make_job("same-trigger"), caps=NO_CAPS)
+        except Exception as exc:  # noqa: BLE001 - the point is that there are none
+            with lock:
+                errors.append(type(exc).__name__)
+            return
+        with lock:
+            outcomes.append(outcome)
+
+    threads = [threading.Thread(target=retry) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=60)
+
+    assert errors == [], f"a retry raised instead of answering: {errors}"
+    assert sum(1 for o in outcomes if o is EnqueueResult.ACCEPTED) == 1
+    assert sum(1 for o in outcomes if o is EnqueueResult.DUPLICATE) == 7
+    assert store.counts() == {QUEUED: 1}
+
+
 # ── exactly-once claim ───────────────────────────────────────────────────────
 
 def test_one_job_goes_to_exactly_one_test_server(store: JobStore, make_job) -> None:

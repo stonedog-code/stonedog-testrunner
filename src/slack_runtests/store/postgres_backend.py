@@ -306,13 +306,26 @@ class PostgresStore(JobStore):
                     return refusal
 
             started = now if state == RUNNING else None
+            # ON CONFLICT, not a bare INSERT. The `SELECT 1` above answers the
+            # ordinary duplicate — a Slack retry arriving after the first is
+            # committed — but it cannot answer two retries arriving AT ONCE:
+            # under READ COMMITTED both read an empty result and both insert,
+            # and the loser gets a UniqueViolation that escapes as a 500. That
+            # is a failure on the exact path idempotency exists for, and
+            # reproduced at eight threads: one accepted, SEVEN exceptions.
+            #
+            # It must not depend on the advisory lock either, because that is
+            # only taken when a cap is configured — tying idempotency to an
+            # unrelated setting is how a guarantee disappears when somebody
+            # turns caps off.
             cur.execute(
                 f"INSERT INTO jobs ({_JOB_COLUMNS}) "
-                f"VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                f"VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+                f"ON CONFLICT (id) DO NOTHING",
                 (job.id, job.product, job.server, job.select_expr, job.marker,
                  job.slack_channel, job.slack_user, now, state, mode, started),
             )
-            return EnqueueResult.ACCEPTED
+            return EnqueueResult.ACCEPTED if cur.rowcount == 1 else EnqueueResult.DUPLICATE
 
     def claim(self, runner_id: str, labels: Iterable[str], lease_seconds: float,
               max_attempts: int, *, caps: Caps = NO_CAPS,
