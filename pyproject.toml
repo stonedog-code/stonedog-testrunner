@@ -12,6 +12,16 @@ dependencies = [
     "cryptography>=50.0.0",
 ]
 
+[project.optional-dependencies]
+# Postgres is NEVER a default. A standalone runner needs nothing but this repo
+# and a file; the driver is installed only by a deployment that has said, with a
+# DSN, that it wants the durable store. Installing it unconditionally would make
+# the zero-config claim false for everybody in order to serve one deployment.
+postgres = [
+    "psycopg[binary]>=3.2.0",
+    "psycopg-pool>=3.2.0",
+]
+
 [project.scripts]
 slack-runtests = "slack_runtests.__main__:main"
 # The two deployables. Each lives in its own top-level folder with its own
@@ -30,13 +40,24 @@ packages = ["src/slack_runtests", "edge/edge_server", "test-server/test_server"]
 dev = [
     "pytest>=9.1.1",
     "pyyaml>=6.0.3",
+    # The store conformance suite runs against BOTH backends, so the driver is a
+    # development dependency even though it is an optional runtime one. A suite
+    # that could only reach one backend would be green over half the code it
+    # claims to cover.
+    "psycopg[binary]>=3.2.0",
+    "psycopg-pool>=3.2.0",
 ]
 
 [tool.pytest.ini_options]
 # `tests/sample` is deliberately EXCLUDED from the default run: it is the suite
 # the server executes on demand, not part of this project's own gate. Running it
 # here would conflate "the prototype works" with "the demo suite passes".
-testpaths = ["tests/unit"]
+# `tests/conformance` is one suite run against every configured store backend.
+# It sits in the default run because SQLite — the default backend — needs no
+# server and no network, so a laptop gets the same coverage as CI for the store
+# it will actually use. Postgres joins the parameter list only when a DSN is
+# set, and CI both sets one and asserts it was used; see tests/conformance/.
+testpaths = ["tests/unit", "tests/conformance"]
 # `edge/` and `test-server/` hold application code, not tests. Naming them here
 # stops a bare `pytest` from walking into them looking for suites — and stops a
 # directory called `test-server` from ever being mistaken for one.

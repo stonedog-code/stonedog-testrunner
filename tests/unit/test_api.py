@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 from slack_runtests import api
 from slack_runtests.config import Config
 from slack_runtests.signature import sign
+from slack_runtests.store import QUEUED, RUNNING, open_store
 
 pytestmark = pytest.mark.unit
 
@@ -34,12 +35,14 @@ def form_body(text: str = "-p webapp", **overrides: str) -> str:
 
 
 @pytest.fixture
-def client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
+def client(monkeypatch: pytest.MonkeyPatch, tmp_path) -> TestClient:
     monkeypatch.delenv("SLACK_BOT_TOKEN", raising=False)
-    # A fresh run registry per test — the module-level dict would otherwise leak
-    # state between tests and make them order-dependent.
-    api._RUNS.clear()
     app = api.app
+    # A fresh store per test, in this test's own tmp_path. The record of what
+    # has been dispatched used to be a module-level dict that had to be cleared
+    # here — which is the same per-process state the production defect was
+    # about, reproduced in the fixture.
+    app.state.store = open_store(str(tmp_path / "runtests.db"))
     app.state.config = Config(
         mode="github",  # never actually spawn pytest from a unit test
         signing_secret=SECRET,
@@ -132,13 +135,65 @@ def test_a_retried_command_does_not_start_a_second_run(client: TestClient) -> No
     second = post(client, form_body())
     assert "Queued" in first.json()["text"]
     assert "already queued" in second.json()["text"]
-    assert len(api._RUNS) == 1
+    assert len(client.app.state.store.recent()) == 1
 
 
 def test_a_different_trigger_id_does_start_a_second_run(client: TestClient) -> None:
+    # A different PRODUCT as well as a different trigger: the default cap allows
+    # one run of a given (product, server) at a time, and this test is about the
+    # idempotency key, not about the cap. The cap has its own tests.
     post(client, form_body())
-    post(client, form_body(trigger_id="trigger-2"))
-    assert len(api._RUNS) == 2
+    post(client, form_body(text="-p billing", trigger_id="trigger-2"))
+    assert len(client.app.state.store.recent()) == 2
+
+
+def test_the_record_of_a_dispatch_survives_a_new_app_instance(
+    client: TestClient, tmp_path
+) -> None:
+    """The failure the module-level dict had, asserted rather than described.
+
+    A dict is per-worker and per-process: a second uvicorn worker had no idea
+    the first had already dispatched, so a Slack retry landing on it started a
+    second identical run. Re-opening the store is the closest a unit test gets
+    to a second worker, and it is enough to pin the property.
+    """
+    post(client, form_body())
+
+    reopened = open_store(str(tmp_path / "runtests.db"))
+    assert reopened.job(_correlation_of(client)) is not None
+    assert reopened.recent()[0]["state"] == RUNNING
+
+
+def _correlation_of(client: TestClient) -> str:
+    return client.app.state.store.recent()[0]["id"]
+
+
+def test_running_the_same_product_twice_at_once_is_refused(client: TestClient) -> None:
+    """A cap refusal says which limit was hit — it is not a duplicate."""
+    post(client, form_body())
+    response = post(client, form_body(trigger_id="trigger-2"))
+
+    text = response.json()["text"]
+    assert "already running" in text
+    assert "already queued" not in text
+
+
+def test_a_channel_cannot_queue_past_its_limit(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """Queued, not running — so this needs the queueing path the edge uses."""
+    from slack_runtests.store import Caps, Job
+
+    store = open_store(str(tmp_path / "caps.db"))
+    caps = Caps(max_queued_per_channel=1)
+
+    def job(job_id: str, product: str) -> Job:
+        return Job(id=job_id, product=product, server="staging", select_expr=None,
+                   marker=None, slack_channel="#testing", slack_user="U1")
+
+    assert store.enqueue(job("a", "webapp"), caps=caps).accepted
+    assert not store.enqueue(job("b", "billing"), caps=caps).accepted
+    assert store.counts() == {QUEUED: 1}
 
 
 def test_results_reports_the_last_run(client: TestClient) -> None:

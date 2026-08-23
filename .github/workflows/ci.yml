@@ -28,6 +28,27 @@ jobs:
   # protection goes on requiring a context that no longer reports.
   gate:
     runs-on: ubuntu-latest
+
+    # The store has two backends and the conformance suite runs against both.
+    # SQLite needs nothing; Postgres needs this. Without it the suite would
+    # still be green — over half the code it claims to cover — which is why the
+    # step below asserts the backend was actually exercised rather than trusting
+    # that the service came up.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: runner
+          POSTGRES_PASSWORD: runner
+          POSTGRES_DB: testrunner
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U runner"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
     steps:
       - uses: actions/checkout@v4
 
@@ -56,5 +77,16 @@ jobs:
       #
       # pytest reports the size of its input set on the last line ("N passed"),
       # and exits 5 having collected nothing, so an empty run fails here.
+      # One suite, both backends. TESTRUNNER_REQUIRED_BACKENDS is the guard
+      # against the failure this repo keeps writing about: if the Postgres
+      # service failed to start, `test_required_backends.py` FAILS rather than
+      # the suite quietly running SQLite twice and reporting green. The header
+      # of every run prints how many backends were exercised.
+      - name: Store conformance tier (SQLite and Postgres)
+        env:
+          TESTRUNNER_TEST_POSTGRES_DSN: postgresql://runner:runner@localhost:5432/testrunner
+          TESTRUNNER_REQUIRED_BACKENDS: sqlite,postgres
+        run: bash run.sh test:conformance
+
       - name: Integration tier (real edge server, real pytest subprocess)
         run: bash run.sh test:integration

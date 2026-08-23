@@ -10,6 +10,24 @@ from slack_runtests import identity
 from .config import load
 
 
+def _redacted(dsn: str) -> str:
+    """A Postgres DSN with the password removed, for a log line.
+
+    A startup line naming the store is worth having; a startup line naming the
+    store's password is a credential in every log aggregator that ever reads it.
+    """
+    from urllib.parse import urlsplit, urlunsplit
+
+    parts = urlsplit(dsn)
+    if not parts.password:
+        return dsn
+    host = parts.hostname or ""
+    if parts.port:
+        host = f"{host}:{parts.port}"
+    netloc = f"{parts.username}:***@{host}" if parts.username else host
+    return urlunsplit((parts.scheme, netloc, parts.path, "", ""))
+
+
 def main() -> int:
     import uvicorn
 
@@ -32,6 +50,26 @@ def main() -> int:
         log.warning("RUNNER_ENROLL_TOKEN is set — unknown test servers can self-enrol")
     if not cfg.admin_token:
         log.info("EDGE_ADMIN_TOKEN unset — /admin/fleet will 404")
+
+    # SAY WHICH STORE THIS IS, EVERY TIME. The two backends fail in opposite
+    # directions and both failures are silent: a SQLite file inside a container
+    # with no persistent volume loses the queue on the next redeploy, and a
+    # Postgres DSN that quietly fell back to a file would look identical in
+    # every log line that follows. The one line below is the difference.
+    log.info(
+        "store: %s (%s)", cfg.store_backend,
+        cfg.store_dsn if cfg.store_backend == "sqlite" else _redacted(cfg.store_dsn),
+    )
+    if cfg.store_backend == "sqlite":
+        log.info(
+            "sqlite serialises writers; a lock is waited on for %.0fs, then the "
+            "caller is told the runner is busy", cfg.db_busy_timeout,
+        )
+    log.info(
+        "caps: %s in flight per (product, server) · %s queued per channel · "
+        "%s running per channel  (0 = unlimited)",
+        cfg.max_active_per_job, cfg.max_queued_per_channel, cfg.max_running_per_channel,
+    )
 
     uvicorn.run(
         "edge_server.app:app",

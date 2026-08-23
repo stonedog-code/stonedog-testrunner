@@ -11,7 +11,7 @@ It ships in three versions, and the differences between them are the whole point
 |---|---|---|---|---|
 | **V1** `RUNTESTS_MODE=local` | validates, then runs pytest itself | **the API host** | nobody | the API |
 | **V2** `RUNTESTS_MODE=github` | validates, then dispatches a workflow | a self-hosted runner polling **GitHub** | GitHub | the runner |
-| **V3** edge + test servers | validates and queues; runs nothing | **your own test servers**, polling the edge | the edge (SQLite) | the test servers |
+| **V3** edge + test servers | validates and queues; runs nothing | **your own test servers**, polling the edge | the edge (SQLite, or Postgres by DSN) | the test servers |
 
 **V3 is the one to deploy, and it lives in [`edge/`](edge/) and
 [`test-server/`](test-server/), each with its own README.**
@@ -151,13 +151,16 @@ slack-runtests/
 │   ├── signature.py                 # Slack HMAC verify, and the signer test.sh uses
 │   ├── config.py                    # every environment read, in one place
 │   ├── api.py                       # the endpoint; V1/V2 switch
+│   ├── store/                       # the queue and the registry
+│   │   ├── base.py                  #   the contract both backends satisfy
+│   │   ├── sqlite_backend.py        #   the DEFAULT — one file, zero config
+│   │   └── postgres_backend.py      #   selected by a DSN, never by accident
 │   └── runners/
 │       ├── local.py                 # V1 — subprocess pytest here
 │       └── github.py                # V2 — workflow_dispatch
 ├── edge/                            # V3 — the public deployable  (README inside)
 │   └── edge_server/
 │       ├── app.py                   # both doors: /slack/commands and /runner/*
-│       ├── store.py                 # the queue: SQLite, atomic claim, leases
 │       ├── auth.py                  # who may enrol, and how
 │       └── config.py
 ├── test-server/                     # V3 — the internal deployable (README inside)
@@ -169,8 +172,9 @@ slack-runtests/
 ├── docker/                          # 1 edge + 3 identical test servers
 ├── .github/workflows/runtests.yml   # the action V2 dispatches
 └── tests/
-    ├── unit/                        # this project's gate (136 tests)
-    ├── integration/                 # 12 tests against REAL processes
+    ├── unit/                        # this project's gate
+    ├── conformance/                 # ONE store suite, run against EVERY backend
+    ├── integration/                 # tests against REAL processes
     │   └── fixture_suite/webapp/    #   a suite with a KNOWN outcome, run for real
     └── sample/webapp/               # the demo suite the Slack command runs
 ```
@@ -221,6 +225,77 @@ so `run: pytest -k ${{ inputs.select }}` with a value of
 your network. Routing through `env:` makes the value data the shell already
 holds. The regex in `parsing.py` is the second lock on the same door; keep both.
 
+## The store — a file by default, Postgres by DSN
+
+The queue, the test-server registry and the record of what has been dispatched
+all live in one store behind one interface, with two implementations.
+
+| | Selected by | Right when |
+|---|---|---|
+| **SQLite** | nothing — it is the default | a standalone runner. One file, no database to stand up, no DSN. |
+| **Postgres** | `EDGE_DB_DSN` (V1/V2: `RUNTESTS_DB_DSN`) | the process has **no durable disk**, or more than one process shares the queue. |
+
+**Set the DSN when a redeploy would delete the file.** A container service with
+no persistent volume — which is what the embedded deployment runs on — loses the
+queue, the in-flight leases and the whole run history every time the site ships.
+That is the reason this exists, and durability is only half of it: SQLite has
+one writer, so a burst of commands is a bounded wait and then an honest "the
+runner is busy". Postgres has no such limit.
+
+Install the driver with the extra; nothing pulls it in by default, because
+requiring a database to run a Slack command would defeat the point:
+
+```bash
+uv sync --extra postgres
+EDGE_DB_DSN=postgresql://edge:…@db.internal/testrunner bash run.sh edge
+```
+
+The edge prints which store it opened at startup, with the password stripped.
+Success and a silent fallback would otherwise look identical in every log line
+that follows.
+
+### Concurrency caps
+
+Three, each doing a different job, and all three enforced **inside the store's
+own transactions** — a check in one statement and a claim in the next is not a
+cap, because two callers both read the same number and both act on it.
+
+| Variable | Default | Bounds |
+|---|---|---|
+| `RUNTESTS_MAX_ACTIVE_PER_JOB` | `1` | repetition — runs of one (product, server) in flight |
+| `RUNTESTS_MAX_QUEUED_PER_CHANNEL` | `10` | the backlog — "a chat box cannot queue fifty runs" |
+| `RUNTESTS_MAX_RUNNING_PER_CHANNEL` | `3` | execution — one channel cannot occupy every test server |
+
+`0` disables any of them. A refusal says which limit was hit: "already running"
+and "already queued" are different facts with different remedies, and reporting
+the wrong one sends somebody looking in the wrong place.
+
+### One suite, both backends
+
+`tests/conformance/` holds every guarantee the queue makes — idempotency,
+exactly-once claim, leases, result ownership, the caps — written once and run
+against each configured backend as a fixture parameter. Not one `if backend ==`
+appears in it: the moment a test needs to know which store it is talking to, the
+two implementations have been allowed to mean different things.
+
+```bash
+bash run.sh test:conformance                       # SQLite only
+TESTRUNNER_TEST_POSTGRES_DSN=postgresql://… \
+TESTRUNNER_REQUIRED_BACKENDS=sqlite,postgres \
+  bash run.sh test:conformance                     # both
+```
+
+Every run prints how many backends it exercised, and
+`TESTRUNNER_REQUIRED_BACKENDS` makes a missing one a **failure, never a skip** —
+CI stands up a real Postgres and requires it, so a service that failed to start
+turns the gate red instead of quietly running SQLite and reporting green.
+
+**This is not theoretical.** The suite's first run against both found a real
+defect that SQLite could not have shown: `BEGIN IMMEDIATE` makes a count and an
+insert atomic for free, while Postgres runs READ COMMITTED, so twelve concurrent
+enqueues under a cap of three all read "2 queued" and **four** got through. The
+fix is a transaction-scoped advisory lock taken only when a cap is configured.
+
 ### Where this prototype knowingly differs from a real deployment
 
 Stated plainly rather than left to be discovered:
@@ -229,9 +304,6 @@ Stated plainly rather than left to be discovered:
   logs a warning on every one. That is how `test.sh` works out of the box. It is
   refused as soon as a secret *is* set, so the insecure path cannot survive into
   a configured deployment — but a real service should not have it at all.
-- **`_RUNS` is an in-process dict.** Two uvicorn workers would each get their
-  own, and the idempotency guarantee silently disappears. Real deployments need
-  Redis or Postgres.
 - **V1 parses counts out of pytest's stdout.** The real implementation is the
   reporter plugin on the nehsa.net page, which hooks pytest and gets exact
   numbers. Unparseable output yields zeros rather than a wrong number, and the
@@ -244,9 +316,16 @@ Stated plainly rather than left to be discovered:
 ## Verified
 
 ```bash
-bash run.sh test -q                # 136 passed  (unit)
-bash run.sh test:integration -q    #  12 passed  (integration, real processes)
+bash run.sh test -q                # unit + store conformance (SQLite)
+bash run.sh test:conformance -q    # the store suite alone, every backend
+bash run.sh test:integration -q    # against REAL processes
 ```
+
+Counts are not quoted here on purpose: a number in a README is a number nothing
+compares to the code, and this fleet has already shipped a README twenty-one
+versions out of date with every gate green throughout. pytest prints the size of
+its input set on the last line of every run, and the conformance suite prints
+its backend count in the header of every run.
 
 Checked, not assumed:
 

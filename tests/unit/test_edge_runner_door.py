@@ -16,7 +16,7 @@ from fastapi.testclient import TestClient
 
 from edge_server import app as edge_app
 from edge_server.config import EdgeConfig
-from edge_server.store import Store
+from slack_runtests.store import open_store
 from slack_runtests import identity
 
 pytestmark = pytest.mark.unit
@@ -43,7 +43,7 @@ def client(tmp_path, trusted_dir) -> TestClient:
         poll_timeout=0,        # do not hold a unit test open for 25 seconds
         lease_seconds=60,
     )
-    app.state.store = Store(tmp_path / "edge.db")
+    app.state.store = open_store(str(tmp_path / "edge.db"))
     app.state.edge_key = identity.generate()
     return TestClient(app)
 
@@ -239,7 +239,7 @@ def test_the_edge_signs_its_replies(client, enrolled) -> None:
 
 
 def test_a_result_cannot_be_posted_for_another_servers_job(client, enrolled) -> None:
-    from edge_server.store import Job
+    from slack_runtests.store import Job
 
     store = client.app.state.store
     store.enqueue(Job(id="job-1", product="webapp", server="staging", select_expr=None,
