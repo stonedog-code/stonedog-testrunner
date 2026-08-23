@@ -47,9 +47,15 @@ services:
       RUNNER_ENROLL_TOKEN: "lab-enrolment-token-not-for-production"
       EDGE_ADMIN_TOKEN: "lab-admin-token"
       # Left unset deliberately: with no signing secret the edge accepts
-      # unverified Slack requests and warns on every one, which is what lets
-      # test.sh drive it. Set it to exercise the verified path.
+      # unverified Slack requests, which is what lets test.sh drive it. Set it
+      # to exercise the verified path.
       SLACK_SIGNING_SECRET: "${SLACK_SIGNING_SECRET:-}"
+      # THE EDGE REFUSES TO START WITHOUT THIS when no signing secret and no
+      # allowlist are configured — an unset allowlist used to allow everyone
+      # and nothing said so. This file is the lab harness, not a deployment,
+      # and it is the only compose file in this repo that sets it. The startup
+      # log lists every protection it is ignoring.
+      RUNTESTS_INSECURE_DEV: "1"
       RUNNER_HEARTBEAT_INTERVAL: "10"
       RUNNER_OFFLINE_AFTER: "30"
       LOG_LEVEL: INFO

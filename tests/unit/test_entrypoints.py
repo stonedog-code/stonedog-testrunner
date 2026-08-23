@@ -23,6 +23,11 @@ pytestmark = pytest.mark.unit
 @pytest.fixture(autouse=True)
 def no_token(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("SLACK_BOT_TOKEN", raising=False)
+    # These tests are about what is ANNOUNCED at startup, not about whether the
+    # process is allowed to start. Both servers now refuse an unconfigured
+    # start, so without this every test in this file would be exercising the
+    # refusal instead of the announcement it is named for.
+    monkeypatch.setenv("RUNTESTS_INSECURE_DEV", "1")
 
 
 def test_the_v1_server_warns_about_slack_before_it_starts_serving(
@@ -101,3 +106,70 @@ def test_a_postgres_password_is_never_written_to_the_log() -> None:
     assert _redacted("postgresql://db.internal/testrunner") == (
         "postgresql://db.internal/testrunner"
     )
+
+
+# ── the startup gate, at the entry points ────────────────────────────────────
+#
+# `tests/unit/test_authz_startup.py` covers the decision. These two cover the
+# WIRING — that each entry point asks, and asks before `uvicorn.run` blocks.
+# The decision being right is worth nothing if a server never consults it, and
+# a refusal printed after the socket is open is not a refusal.
+
+@pytest.mark.parametrize(
+    "module,extra_env",
+    [
+        ("slack_runtests.__main__", {}),
+        ("edge_server.__main__", {"EDGE_KEY_PATH": "", "EDGE_DB_PATH": ""}),
+    ],
+)
+def test_an_unconfigured_server_exits_instead_of_serving(
+    module: str, extra_env: dict, monkeypatch: pytest.MonkeyPatch, tmp_path, capsys
+) -> None:
+    import importlib
+
+    import uvicorn
+
+    monkeypatch.delenv("RUNTESTS_INSECURE_DEV", raising=False)
+    for name in ("SLACK_SIGNING_SECRET", "SLACK_TEAM_ID", "RUNTESTS_CHANNELS",
+                 "RUNTESTS_USERS"):
+        monkeypatch.delenv(name, raising=False)
+    for name, value in extra_env.items():
+        monkeypatch.setenv(name, value or str(tmp_path / name.lower()))
+
+    served: list[str] = []
+    monkeypatch.setattr(uvicorn, "run", lambda *a, **k: served.append("served"))
+
+    entry = importlib.import_module(module)
+    assert entry.main() == 2, "an unconfigured server must exit non-zero"
+    assert served == [], "it must refuse BEFORE uvicorn.run, which blocks"
+    assert "REFUSING TO START" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "module,extra_env",
+    [
+        ("slack_runtests.__main__", {}),
+        ("edge_server.__main__", {"EDGE_KEY_PATH": "", "EDGE_DB_PATH": ""}),
+    ],
+)
+def test_a_configured_server_serves(
+    module: str, extra_env: dict, monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """The other direction — the gate must not simply refuse everything."""
+    import importlib
+
+    import uvicorn
+
+    monkeypatch.delenv("RUNTESTS_INSECURE_DEV", raising=False)
+    monkeypatch.setenv("SLACK_SIGNING_SECRET", "s3cr3t")
+    monkeypatch.setenv("SLACK_TEAM_ID", "T_ALLOWED")
+    monkeypatch.setenv("RUNTESTS_CHANNELS", "C_ALLOWED")
+    for name, value in extra_env.items():
+        monkeypatch.setenv(name, value or str(tmp_path / name.lower()))
+
+    served: list[str] = []
+    monkeypatch.setattr(uvicorn, "run", lambda *a, **k: served.append("served"))
+
+    entry = importlib.import_module(module)
+    assert entry.main() == 0
+    assert served == ["served"]

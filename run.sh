@@ -34,15 +34,35 @@ cd "$(dirname "$0")"
 
 uv sync --quiet
 
+# Both servers now REFUSE to start with no signing secret and no allowlist,
+# because an unset allowlist used to allow everyone and nothing said so. That
+# refusal must not make `bash run.sh` stop working on a laptop, so this sets the
+# opt-out — and PRINTS that it did. The variable is never set in an image, and
+# an existing value is left alone so `SLACK_SIGNING_SECRET=... bash run.sh edge`
+# still exercises the configured path.
+dev_mode_if_unconfigured() {
+  if [ -n "${RUNTESTS_INSECURE_DEV:-}" ]; then
+    return
+  fi
+  if [ -n "${SLACK_SIGNING_SECRET:-}" ] && [ -n "${SLACK_TEAM_ID:-}" ] \
+     && { [ -n "${RUNTESTS_CHANNELS:-}" ] || [ -n "${RUNTESTS_USERS:-}" ]; }; then
+    return
+  fi
+  printf 'no Slack protection configured — setting RUNTESTS_INSECURE_DEV=1 for local dev\n' >&2
+  export RUNTESTS_INSECURE_DEV=1
+}
+
 cmd="${1:-serve}"
 [ $# -gt 0 ] && shift
 
 case "$cmd" in
   serve)
+    dev_mode_if_unconfigured
     printf 'serving from %s — mode=%s\n' "$UV_PROJECT_ENVIRONMENT" "${RUNTESTS_MODE:-local}"
     exec uv run slack-runtests "$@"
     ;;
   edge)
+    dev_mode_if_unconfigured
     printf 'edge server — slack=%s\n' "${SLACK_SIGNING_SECRET:+configured}${SLACK_SIGNING_SECRET:-UNVERIFIED}"
     exec uv run slack-runtests-edge "$@"
     ;;

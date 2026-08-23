@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 
 from slack_runtests import identity
+from slack_runtests.authz import refuse_or_warn
 
 from .config import load
 
@@ -44,8 +46,6 @@ def main() -> int:
     key = identity.load_or_create(cfg.key_path)
     log.info("edge identity %s (key %s)", identity.fingerprint(identity.public_b64(key)), cfg.key_path)
 
-    if not cfg.signing_secret:
-        log.warning("SLACK_SIGNING_SECRET unset — Slack requests will be accepted UNVERIFIED")
     if cfg.enroll_token:
         log.warning("RUNNER_ENROLL_TOKEN is set — unknown test servers can self-enrol")
     if not cfg.admin_token:
@@ -70,6 +70,23 @@ def main() -> int:
         "%s running per channel  (0 = unlimited)",
         cfg.max_active_per_job, cfg.max_queued_per_channel, cfg.max_running_per_channel,
     )
+
+    # BEFORE uvicorn.run, which blocks. The public door is the whole reason
+    # this process exists, so refusing to open one that protects nothing has to
+    # happen before it is open.
+    refusal = refuse_or_warn(
+        log,
+        signing_secret=cfg.signing_secret,
+        allowed_team=cfg.allowed_team,
+        allowed_channels=cfg.allowed_channels,
+        allowed_users=cfg.allowed_users,
+        # The app's lifespan does the announcing; it runs whichever way this
+        # process was started, so warning here too would print it twice.
+        warn=False,
+    )
+    if refusal is not None:
+        print(refusal, file=sys.stderr)
+        return 2
 
     uvicorn.run(
         "edge_server.app:app",

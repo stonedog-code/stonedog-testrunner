@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 
+from .authz import refuse_or_warn
 from .config import load
 from .slack import announce_configuration
 
@@ -22,7 +24,25 @@ def main() -> int:
     # who starts it with no token gets a working test runner that posts
     # nowhere — and, without this line, no hint of that until the first run.
     cfg = load()
-    announce_configuration(logging.getLogger("slack-runtests"), cfg.default_channel)
+    log = logging.getLogger("slack-runtests")
+    announce_configuration(log, cfg.default_channel)
+
+    # BEFORE uvicorn.run, which blocks. A refusal printed after the server is
+    # already serving is not a refusal — and this is the same ordering the
+    # Slack announcement above is tested for.
+    refusal = refuse_or_warn(
+        log,
+        signing_secret=cfg.signing_secret,
+        allowed_team=cfg.allowed_team,
+        allowed_channels=cfg.allowed_channels,
+        allowed_users=cfg.allowed_users,
+        # The app's lifespan does the announcing; it runs whichever way this
+        # process was started, so warning here too would print it twice.
+        warn=False,
+    )
+    if refusal is not None:
+        print(refusal, file=sys.stderr)
+        return 2
 
     uvicorn.run(
         "slack_runtests.api:app",
