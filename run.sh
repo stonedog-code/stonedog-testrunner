@@ -40,15 +40,27 @@ uv sync --quiet
 # opt-out — and PRINTS that it did. The variable is never set in an image, and
 # an existing value is left alone so `SLACK_SIGNING_SECRET=... bash run.sh edge`
 # still exercises the configured path.
+# NOTHING configured, not "something missing". This distinction is the whole
+# safety of the function and the first version got it wrong: it set the opt-out
+# whenever ANY protection was absent, so a deployment with a signing secret, a
+# team id and a TYPO in RUNTESTS_CHANNELS was silently opted into insecure mode
+# by its own launcher — restoring the exact fail-open this change exists to
+# close, and doing it to the operator who was visibly trying to configure it.
+#
+# A fresh checkout has none of them set. Somebody who has set even one is
+# configuring this deliberately, and deserves the gate's refusal naming what is
+# still missing, not a launcher that decides for them.
 dev_mode_if_unconfigured() {
   if [ -n "${RUNTESTS_INSECURE_DEV:-}" ]; then
     return
   fi
-  if [ -n "${SLACK_SIGNING_SECRET:-}" ] && [ -n "${SLACK_TEAM_ID:-}" ] \
-     && { [ -n "${RUNTESTS_CHANNELS:-}" ] || [ -n "${RUNTESTS_USERS:-}" ]; }; then
+  if [ -n "${SLACK_SIGNING_SECRET:-}" ] || [ -n "${SLACK_TEAM_ID:-}" ] \
+     || [ -n "${RUNTESTS_CHANNELS:-}" ] || [ -n "${RUNTESTS_USERS:-}" ]; then
     return
   fi
-  printf 'no Slack protection configured — setting RUNTESTS_INSECURE_DEV=1 for local dev\n' >&2
+  printf 'no Slack protection configured at all — setting RUNTESTS_INSECURE_DEV=1 for local dev\n' >&2
+  printf 'set any one of SLACK_SIGNING_SECRET / SLACK_TEAM_ID / RUNTESTS_CHANNELS / RUNTESTS_USERS\n' >&2
+  printf 'and this stops, so a half-configured server refuses to start instead.\n' >&2
   export RUNTESTS_INSECURE_DEV=1
 }
 

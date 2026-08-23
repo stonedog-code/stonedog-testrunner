@@ -71,7 +71,17 @@ async def _startup_gate(app: FastAPI):
         allowed_users=cfg.allowed_users,
     )
     if refusal is not None:
-        raise RuntimeError(refusal)
+        # LOGGED, then raised with one line. Raising the whole block gets it
+        # wrapped in a Python traceback, which buries the part an operator
+        # needs — the list of what to set — inside stack frames that tell them
+        # nothing. The traceback still happens; it just no longer carries the
+        # message that deserved to be read.
+        for line in refusal.splitlines():
+            log.critical("%s", line)
+        raise RuntimeError(
+            "refusing to start: required Slack protections are not configured "
+            "(see the lines above)"
+        )
     yield
 
 app = FastAPI(title="slack-runtests-edge", lifespan=_startup_gate)

@@ -45,8 +45,33 @@ STARTED = "Application startup complete"
 REFUSED = "Application startup failed"
 
 
+def _settle(process: subprocess.Popen, reader: threading.Thread, *,
+            expect_exit: bool) -> None:
+    """Stop a launched process, distinguishing "it should have exited" from
+    "it is meant to keep running".
+
+    A refusal is only a few milliseconds behind the message that announces it,
+    so a harness that terminates the moment the text appears records SIGTERM
+    (143) instead of the process's own exit code — a flake in the test, and one
+    that would have been read as a flake in the product.
+    """
+    if expect_exit:
+        try:
+            process.wait(timeout=20)
+        except subprocess.TimeoutExpired:
+            pass
+    if process.poll() is None:
+        process.terminate()
+    try:
+        process.wait(timeout=15)
+    except subprocess.TimeoutExpired:  # pragma: no cover - a wedged uvicorn
+        process.kill()
+        process.wait(timeout=15)
+    reader.join(timeout=5)
+
+
 def _launch(app: str, overrides: dict[str, str], tmp_path, *, until: str,
-            deadline: float = 60.0) -> str:
+            expect_exit: bool = False, deadline: float = 60.0) -> str:
     """Start a real uvicorn, read until `until` appears or it exits, then stop it.
 
     Terminated by its own handle, never by matching a pattern: `pkill -f uvicorn`
@@ -74,20 +99,13 @@ def _launch(app: str, overrides: dict[str, str], tmp_path, *, until: str,
                 break
             time.sleep(0.05)
     finally:
-        if process.poll() is None:
-            process.terminate()
-        try:
-            process.wait(timeout=15)
-        except subprocess.TimeoutExpired:  # pragma: no cover - a wedged uvicorn
-            process.kill()
-            process.wait(timeout=15)
-        reader.join(timeout=5)
+        _settle(process, reader, expect_exit=expect_exit)
     return "".join(chunks)
 
 
 @pytest.mark.parametrize("app", APPS)
 def test_a_bare_uvicorn_launch_cannot_go_around_the_gate(app: str, tmp_path) -> None:
-    output = _launch(app, {}, tmp_path, until=REFUSED)
+    output = _launch(app, {}, tmp_path, until=REFUSED, expect_exit=True)
 
     assert "REFUSING TO START" in output, output[-2000:]
     assert REFUSED in output, output[-2000:]
@@ -120,3 +138,90 @@ def test_the_opt_out_starts_it_and_names_what_it_ignored(app: str, tmp_path) -> 
     assert "NOT PROTECTING ANYTHING" in output, output[-2000:]
     for name in ("SLACK_SIGNING_SECRET", "SLACK_TEAM_ID", "RUNTESTS_CHANNELS"):
         assert name in output
+
+
+# ── the launcher must not rescue a half-configured deployment ────────────────
+#
+# `run.sh` sets RUNTESTS_INSECURE_DEV so a fresh checkout works with no
+# configuration at all. Its first version set it whenever ANY protection was
+# absent — so a deployment with a signing secret, a team id and a typo in
+# RUNTESTS_CHANNELS was opted into insecure mode BY ITS OWN LAUNCHER, restoring
+# the exact fail-open this whole change closes, and doing it to the one operator
+# who was visibly trying to configure the thing.
+#
+# Found by review, not by a test, which is why these exist.
+
+def _run_sh(overrides: dict[str, str], tmp_path, *, until: str,
+            expect_exit: bool = False,
+            deadline: float = 45.0) -> tuple[int | None, str]:
+    env = {k: v for k, v in os.environ.items() if k not in PROTECTIONS}
+    env["EDGE_DB_PATH"] = str(tmp_path / "edge.db")
+    env["EDGE_KEY_PATH"] = str(tmp_path / "edge.pem")
+    env["EDGE_TRUSTED_KEYS_DIR"] = str(tmp_path / "trusted")
+    env["PORT"] = "0"
+    env.update(overrides)
+
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    process = subprocess.Popen(
+        ["bash", "run.sh", "edge"], cwd=root, env=env,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        start_new_session=True,
+    )
+    chunks: list[str] = []
+    reader = threading.Thread(target=lambda: chunks.extend(process.stdout), daemon=True)
+    reader.start()
+    try:
+        end = time.monotonic() + deadline
+        while time.monotonic() < end:
+            if until in "".join(chunks) or process.poll() is not None:
+                break
+            time.sleep(0.05)
+    finally:
+        _settle(process, reader, expect_exit=expect_exit)
+    return process.returncode, "".join(chunks)
+
+
+@pytest.mark.parametrize(
+    "partial",
+    [
+        {"SLACK_SIGNING_SECRET": "s3cr3t"},
+        {"SLACK_TEAM_ID": "T_ALLOWED"},
+        {"SLACK_SIGNING_SECRET": "s3cr3t", "SLACK_TEAM_ID": "T_ALLOWED"},
+        {"SLACK_SIGNING_SECRET": "s3cr3t", "RUNTESTS_CHANNELS": "C_ALLOWED"},
+    ],
+    ids=["secret-only", "team-only", "secret+team", "secret+channels"],
+)
+def test_run_sh_refuses_a_half_configured_start(partial: dict, tmp_path) -> None:
+    """One protection set is somebody configuring this. The launcher must not
+    decide for them; the gate must refuse and name what is still missing."""
+    code, output = _run_sh(partial, tmp_path, until="REFUSING TO START",
+                           expect_exit=True)
+
+    assert "REFUSING TO START" in output, output[-2000:]
+    assert "RUNTESTS_INSECURE_DEV=1 for local dev" not in output, (
+        "run.sh opted a half-configured start into insecure mode"
+    )
+    assert code == 2, f"expected exit 2, got {code}"
+
+
+def test_run_sh_still_works_on_a_fresh_checkout(tmp_path) -> None:
+    """The other direction. With NOTHING set, `bash run.sh edge` must still
+    start — that is the whole reason the opt-out is applied at all, and a gate
+    that broke the documented local command would simply be turned off."""
+    _, output = _run_sh({}, tmp_path, until=STARTED)
+
+    assert "setting RUNTESTS_INSECURE_DEV=1 for local dev" in output, output[-2000:]
+    assert STARTED in output, output[-2000:]
+    assert "NOT PROTECTING ANYTHING" in output, output[-2000:]
+
+
+def test_run_sh_leaves_a_fully_configured_start_alone(tmp_path) -> None:
+    _, output = _run_sh({
+        "SLACK_SIGNING_SECRET": "s3cr3t",
+        "SLACK_TEAM_ID": "T_ALLOWED",
+        "RUNTESTS_CHANNELS": "C_ALLOWED",
+    }, tmp_path, until=STARTED)
+
+    assert STARTED in output, output[-2000:]
+    assert "NOT PROTECTING ANYTHING" not in output
+    assert "RUNTESTS_INSECURE_DEV" not in output
