@@ -88,6 +88,8 @@ that the same party answered twice.
 | `RUNTESTS_SUITE_ROOT` | `tests/sample` | Suites are at `<workdir>/<suite_root>/<product>`. |
 | `RUNNER_JOB_TIMEOUT` | `900` | A run past this is killed and reported as a timeout. |
 | `RUNNER_HEARTBEAT_INTERVAL` | `30` | Overridden by whatever the edge returns at enrolment. |
+| `RUNNER_RETRY_SECONDS` | `5` | First backoff after a failed call to the edge. |
+| `RUNNER_MAX_RETRY_SECONDS` | `60` | Ceiling on that backoff. A test server that cannot reach the edge must keep trying — it is the only side that can open a connection — but retrying every 5s forever against an edge that is down is a busy loop with a network attached. |
 | `SLACK_BOT_TOKEN` | *(empty)* | **Empty means every message prints to this machine's console** instead of being sent. |
 | `SLACK_DEFAULT_CHANNEL` | `#testing` | Used when a job carries no channel. |
 

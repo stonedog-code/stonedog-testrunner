@@ -90,3 +90,23 @@ jobs:
 
       - name: Integration tier (real edge server, real pytest subprocess)
         run: bash run.sh test:integration
+
+      # A Dockerfile that BUILDS proves almost nothing. The two targets differ
+      # by a few COPY lines and two `uv sync` flags, and every way of getting
+      # those wrong produces an image that builds perfectly and is wrong at
+      # runtime — an edge that can run a suite, an edge with no Postgres
+      # driver, a runner with no pytest. This checks what each image IS, and
+      # prints the inventory it checked.
+      - name: Image tier (what the edge and runner images actually contain)
+        run: bash docker/smoke.sh
+
+      # The two deployment examples, brought up for real. A configuration
+      # example nobody runs is one that rots invisibly: the compose file still
+      # parses, the README still reads correctly, and the first person to find
+      # it broken is a stranger who trusted it.
+      #
+      # It also carries the check that cannot be made anywhere else — a signed
+      # Slack command sent THROUGH the example proxy, which fails if anything
+      # in the path re-serialises the body.
+      - name: Example tier (both deployments, up for real)
+        run: bash examples/verify.sh

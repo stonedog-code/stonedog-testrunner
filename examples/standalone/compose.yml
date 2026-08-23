@@ -1,0 +1,84 @@
+# STRATEGY A — STANDALONE. The edge on its own host, publishing its own port.
+#
+#     cp .env.example .env      # then edit it — this will not start until you do
+#     docker compose up -d
+#
+# This is the smaller of the two deployments and the one to start with. Nothing
+# in it refers to any particular company, domain or product: every value is a
+# placeholder you are meant to replace, and the server REFUSES TO START until
+# you have, so forgetting is a refusal rather than an open endpoint.
+#
+# WHAT THIS IS NOT
+#
+# There is no TLS here. Terminate it in front — a reverse proxy, a load
+# balancer, whatever your host already has — and do not publish 8500 to the
+# internet directly. Slack requires HTTPS for a slash-command URL anyway, so
+# this is not an optional hardening step; it is a thing that will not work
+# without.
+
+name: testrunner-standalone
+
+services:
+  edge:
+    # The published image. `examples/verify.sh` overrides this with a locally
+    # built one so the example can be run against a checkout without editing
+    # the file a reader is meant to copy.
+    image: "${TESTRUNNER_EDGE_IMAGE:-ghcr.io/OWNER/REPO/edge:latest}"
+    # Or build it here instead of pulling. Uncomment, and point context at a
+    # checkout of this repository:
+    # build:
+    #   context: ../..
+    #   dockerfile: docker/Dockerfile
+    #   target: edge
+    restart: unless-stopped
+    ports:
+      # Bound to LOCALHOST, deliberately. The reverse proxy in front of this
+      # reaches it here; the internet does not. `- "8500:8500"` would publish it
+      # on every interface the host has, which on a cloud VM means the public
+      # one — an unencrypted public endpoint one character away from a correct
+      # configuration.
+      - "127.0.0.1:8500:8500"
+    environment:
+      HOST: "0.0.0.0"
+      PORT: "8500"
+
+      # ── the four settings the server refuses to start without ─────────────
+      # An empty allowlist used to mean "allow everyone". It no longer starts.
+      SLACK_SIGNING_SECRET: "${SLACK_SIGNING_SECRET:?set this in .env}"
+      SLACK_TEAM_ID: "${SLACK_TEAM_ID:?set this in .env}"
+      RUNTESTS_CHANNELS: "${RUNTESTS_CHANNELS:-}"
+      RUNTESTS_USERS: "${RUNTESTS_USERS:-}"
+
+      # ── the store ─────────────────────────────────────────────────────────
+      # SQLite on a volume, which is right here: this container HAS a durable
+      # disk. Use EDGE_DB_DSN instead on a container service that does not —
+      # see the embedded example, and the store section of the root README.
+      EDGE_DB_PATH: /app/data/edge.db
+      EDGE_KEY_PATH: /app/keys/edge_ed25519.pem
+
+      # ── who may enrol a test server ───────────────────────────────────────
+      # Pre-authorised keys, which is the production path: drop
+      # `<runner_id>.pub` into ./trusted_runners and nothing else is needed or
+      # accepted. RUNNER_ENROLL_TOKEN is deliberately absent — a shared
+      # bootstrap token is a lab convenience, and the edge warns for as long as
+      # one is set.
+      EDGE_TRUSTED_KEYS_DIR: /app/trusted_runners
+      EDGE_ADMIN_TOKEN: "${EDGE_ADMIN_TOKEN:-}"
+
+      LOG_LEVEL: INFO
+    volumes:
+      - edge-data:/app/data
+      - edge-keys:/app/keys
+      # Read-only: the edge never needs to write a test server's public key,
+      # and a directory it cannot write is one an exploit cannot add a key to.
+      - ./trusted_runners:/app/trusted_runners:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8500/healthz')"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 10s
+
+volumes:
+  edge-data:
+  edge-keys:
