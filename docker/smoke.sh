@@ -99,10 +99,19 @@ contains 'the test server is not also the edge'  'edge_server=N'   "$runner_inv"
 
 # ── the edge refuses an unconfigured start ───────────────────────────────────
 printf '== an unconfigured edge must refuse to start ==\n'
+# `timeout`, and it is not belt and braces. This container is expected to exit
+# on its own within a second; if the gate ever regresses and it SERVES instead,
+# an unbounded foreground `docker run` blocks forever inside a command
+# substitution. CI would then hang rather than fail — the one outcome worse than
+# a red build, because a hang is eventually cancelled and read as flakiness.
 set +e
-unconfigured="$(docker run --rm --name "$CONTAINER" "$EDGE_IMAGE" 2>&1)"
+unconfigured="$(timeout 60 docker run --rm --name "$CONTAINER" "$EDGE_IMAGE" 2>&1)"
 unconfigured_code=$?
 set -e
+if [ "$unconfigured_code" -eq 124 ]; then
+  printf '  FAIL  the unconfigured edge did not exit — it served instead\n'
+  failures=$((failures + 1))
+fi
 docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
 
 check 'it exits non-zero' 'nonzero' "$([ "$unconfigured_code" -ne 0 ] && echo nonzero || echo "zero($unconfigured_code)")"
@@ -149,7 +158,7 @@ docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
 check 'pytest is still absent from the RUNNING edge' 'absent' "$running_pytest"
 
 contains 'it answers /healthz'          '"ok"'          "$health"
-contains 'it names the store backend'   'store: sqlite' "$started"
+contains 'it names the store it OPENED'  'store ready: sqlite' "$started"
 contains 'it names its concurrency caps' 'caps:'        "$started"
 # The point of the previous check is that success and a silent fallback to the
 # wrong store are otherwise identical in every log line that follows.

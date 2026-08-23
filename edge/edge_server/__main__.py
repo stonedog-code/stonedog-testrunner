@@ -70,13 +70,14 @@ def main() -> int:
     if not cfg.admin_token:
         log.info("EDGE_ADMIN_TOKEN unset — /admin/fleet will 404")
 
-    # SAY WHICH STORE THIS IS, EVERY TIME. The two backends fail in opposite
-    # directions and both failures are silent: a SQLite file inside a container
-    # with no persistent volume loses the queue on the next redeploy, and a
-    # Postgres DSN that quietly fell back to a file would look identical in
-    # every log line that follows. The one line below is the difference.
+    # WHAT WAS ASKED FOR. The app's lifespan logs `store ready: <backend>` once
+    # it has actually opened one — and the difference between the two lines is
+    # the point. This one said `store: postgres` for a DSN that could not be
+    # reached at all, which is the green-over-an-empty-set shape: a line whose
+    # only job is to distinguish a working Postgres from a silent fallback, and
+    # which could not.
     log.info(
-        "store: %s (%s)", cfg.store_backend,
+        "store configured: %s (%s)", cfg.store_backend,
         cfg.store_dsn if cfg.store_backend == "sqlite" else _redacted(cfg.store_dsn),
     )
     if cfg.store_backend == "sqlite":

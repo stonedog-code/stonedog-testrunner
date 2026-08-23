@@ -60,7 +60,20 @@ services:
       # THE DSN IS THE WHOLE POINT OF THIS DEPLOYMENT. Setting it is the only
       # way to select Postgres; leave it empty and the edge writes a SQLite file
       # onto a disk that may not survive the next deploy.
-      EDGE_DB_DSN: "postgresql://${POSTGRES_USER:-testrunner}:${POSTGRES_PASSWORD:?set this in .env}@db:5432/${POSTGRES_DB:-testrunner}"
+      #
+      # THE PASSWORD APPEARS HERE INSIDE A URI, AND THE DATABASE BELOW WANTS IT
+      # RAW. Those are two different encodings of one secret, and conflating
+      # them is a trap with no error message: percent-encode the shared variable
+      # and Postgres's password literally becomes `p%40ss`, so the DSN decodes to
+      # something that no longer matches. Leave it raw and a `@` truncates the
+      # host instead — reported as a networking error against a hostname you
+      # never typed.
+      #
+      # So the DSN takes its own variable, defaulting to the raw one. With an
+      # unreserved password (what `openssl rand -hex 32` gives you) they are the
+      # same string and there is nothing to think about. With a password that
+      # contains `@ / ? # : %`, set BOTH — see .env.example.
+      EDGE_DB_DSN: "postgresql://${POSTGRES_USER:-testrunner}:${EDGE_DB_PASSWORD_ENCODED:-${POSTGRES_PASSWORD:?set this in .env}}@db:5432/${POSTGRES_DB:-testrunner}"
       EDGE_KEY_PATH: /app/keys/edge_ed25519.pem
       EDGE_TRUSTED_KEYS_DIR: /app/trusted_runners
       LOG_LEVEL: INFO

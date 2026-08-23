@@ -107,7 +107,7 @@ standalone_health="$(curl -fsS --max-time 5 http://127.0.0.1:8500/healthz 2>&1 |
 standalone_logs="$(compose standalone logs edge 2>&1 || true)"
 
 contains 'it answers /healthz on localhost' '"ok"'          "$standalone_health"
-contains 'it opened a SQLite store'         'store: sqlite' "$standalone_logs"
+contains 'it opened a SQLite store'         'store ready: sqlite' "$standalone_logs"
 
 # Published on the LOOPBACK only. `- "8500:8500"` would bind every interface,
 # which on a cloud VM is the public one — an unencrypted public endpoint one
@@ -120,23 +120,33 @@ compose standalone down -v >/dev/null 2>&1 || true
 
 # ── strategy B ──────────────────────────────────────────────────────────────
 printf '== strategy B — embedded sidecar ==\n'
+
+# THE HARD CASE, run rather than described. Postgres gets the password raw and
+# the DSN gets it percent-encoded — two encodings of one secret, which is the
+# trap this example documents. A tame alphanumeric password here would prove
+# nothing about the case that actually breaks, and would let a broken
+# two-variable path ship looking tested.
+PG_PASSWORD_RAW='p@ss/w0rd#1?x'
+PG_PASSWORD_ENCODED="$(python3 -c 'import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=""))' "$PG_PASSWORD_RAW")"
+printf '  using a password with reserved characters: %s -> %s\n' "$PG_PASSWORD_RAW" "$PG_PASSWORD_ENCODED"
 cat > "$EXAMPLES/embedded/.env" <<ENV
 SLACK_SIGNING_SECRET=$SECRET
 SLACK_TEAM_ID=$TEAM
 RUNTESTS_CHANNELS=$CHANNEL
 RUNTESTS_USERS=
 POSTGRES_USER=testrunner
-POSTGRES_PASSWORD=verify-not-a-real-password
+POSTGRES_PASSWORD=$PG_PASSWORD_RAW
+EDGE_DB_PASSWORD_ENCODED=$PG_PASSWORD_ENCODED
 POSTGRES_DB=testrunner
 APP_PORT=18080
 ENV
 compose embedded up -d --wait --wait-timeout 180 >/dev/null 2>&1 || true
 
 embedded_logs="$(compose embedded logs edge 2>&1 || true)"
-contains 'the sidecar opened a POSTGRES store' 'store: postgres' "$embedded_logs"
+contains 'the sidecar opened a POSTGRES store' 'store ready: postgres' "$embedded_logs"
 # The DSN carries a password. It must not reach the log.
 case "$embedded_logs" in
-  *verify-not-a-real-password*)
+  *"$PG_PASSWORD_ENCODED"*|*"$PG_PASSWORD_RAW"*)
     printf '  FAIL  the store password reached the log\n'; failures=$((failures + 1)) ;;
   *) printf '  ok    the store password never reaches the log\n' ;;
 esac
@@ -184,13 +194,12 @@ tampered="$(curl -sS --max-time 10 \
   -H "X-Slack-Request-Timestamp: $TS" \
   -H "X-Slack-Signature: $SIG" \
   --data-raw "${BODY}&tampered=1" 2>&1 || echo "request failed")"
-case "$tampered" in
-  *Queued*)
-    printf '  FAIL  a tampered body was accepted — the signature is not being checked\n'
-    failures=$((failures + 1)) ;;
-  *) printf '  ok    a tampered body is refused\n' ;;
-esac
-checks=$((checks + 1))
+# ASSERT THE REFUSAL, not merely the absence of acceptance. "does not contain
+# Queued" is also true of a 502, a timeout, a crashed container and a typo in
+# the URL — so written that way, a security check passes on every kind of
+# connection failure. The edge answers a bad signature with 401 and
+# {"error":"bad signature"}, and that is what must arrive.
+contains 'a tampered body is REFUSED, by name' 'bad signature' "$tampered"
 
 printf '\n== %d check(s), %d failure(s) ==\n' "$checks" "$failures"
 [ "$failures" -eq 0 ] || exit 1

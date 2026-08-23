@@ -47,8 +47,17 @@ DOC_FILES = ("README.md", "edge/README.md", "test-server/README.md", ".env.examp
 #: that reports four false failures is a rule somebody deletes.
 _NAME = r"[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+"
 
-#: `os.environ.get("X")`, `os.environ["X"]`, and this repo's `_csv`/`_num` helpers.
-READS = re.compile(r'(?:os\.environ(?:\.get)?[\(\[]|_csv\(|_num\()\s*"(' + _NAME + r')"')
+#: `os.environ.get("X")`, `os.environ["X"]`, `os.getenv("X")`, and this repo's
+#: `_csv`/`_num` helpers.
+#:
+#: `os.getenv` appears nowhere in this repository today, and is matched anyway.
+#: It is the most common way to read an environment variable in Python, so the
+#: first person to reach for it would have silently opted their variable out of
+#: this entire check — and the variables this check protects are the ones whose
+#: absence leaves a public endpoint unprotected.
+READS = re.compile(
+    r'(?:os\.environ(?:\.get)?[\(\[]|os\.getenv\(|_csv\(|_num\()\s*"(' + _NAME + r')"'
+)
 #: A name held in a constant — `INSECURE_DEV_ENV = "RUNTESTS_INSECURE_DEV"`.
 #: `authz.py` reads its variable through one, so without this the scanner cannot
 #: see the single most important setting in the repo.
