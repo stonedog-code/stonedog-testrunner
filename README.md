@@ -298,6 +298,25 @@ channel. That is *E2E minus Slack*, and calling it end-to-end without the
 qualifier would be claiming a tier that does not exist. TLS and the public
 internet are likewise not covered.
 
+**The outbound Slack request IS covered, against a real local server** —
+`tests/integration/test_outbound_to_slack.py` points `SLACK_API_BASE` at an
+ephemeral `127.0.0.1` port and lets `SlackNotifier` make a genuine HTTP request,
+so the JSON body, the bearer header, the charset and the method are asserted on
+the wire. No secret, no workspace, no network.
+
+That tier exists because the unit tests stub `fetch` and assert on what was
+handed to the stub: they prove the *call site* and nothing about the request.
+Measured — **delete the `Authorization` header entirely and the unit tier still
+reports 141 passed**, while every real request would fail `invalid_auth`.
+
+A staging Slack workspace was considered for the last hop and rejected
+(NEH-1088). A Slack app, a bot token, a signing secret and a runner holding a
+private key is a permanent operational burden for a prototype, and what it
+would prove — that Slack's API works — is not where the defects are. Recorded
+inbound fixtures were the other candidate and are strictly weaker: they describe
+what Slack sends us, never what we send Slack, and a fixture cannot be wrong
+about a header nobody wrote down.
+
 Also still missing: the lease-expiry recovery path is proven by unit tests with
 a controlled clock rather than by killing a container mid-run.
 
