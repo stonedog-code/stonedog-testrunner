@@ -40,6 +40,7 @@ from fastapi.responses import JSONResponse, Response
 
 from slack_runtests import gate, identity
 from slack_runtests.authz import refuse_or_warn
+from slack_runtests.logsetup import ensure_configured
 from slack_runtests.store import EnqueueResult, Job, JobStore, StoreBusy, open_store
 
 from . import auth
@@ -61,6 +62,10 @@ async def _startup_gate(app: FastAPI):
 
     One decision (`refuse_or_warn`), two call sites, on purpose.
     """
+    # Before the first log line, and only if nothing else has: a bare
+    # `uvicorn module:app` leaves application loggers with no handler at
+    # all, so everything below would be written to nowhere.
+    ensure_configured()
     cfg = getattr(app.state, "config", None) or load()
     app.state.config = cfg
     refusal = refuse_or_warn(
@@ -82,6 +87,25 @@ async def _startup_gate(app: FastAPI):
             "refusing to start: required Slack protections are not configured "
             "(see the lines above)"
         )
+
+    # OPEN THE STORE HERE, not on the first request.
+    #
+    # It used to be opened lazily, and two things followed that were only
+    # visible when a DSN was actually wrong. A store that cannot be opened let
+    # the process start and answer /healthz, then returned 500 to the first
+    # Slack command — the failure arriving in front of a user, hours later, and
+    # reading as the bot being broken. And the startup line said
+    # `store: postgres` because it was reading the CONFIGURED backend: exactly
+    # the green-over-an-empty-set this line exists to prevent, since its whole
+    # job is to distinguish a working Postgres from a silent fallback.
+    #
+    # Now it is opened before the socket, and the backend is reported by the
+    # OPENED STORE rather than by the configuration that asked for it.
+    store = getattr(app.state, "store", None)
+    if store is None:
+        store = open_store(cfg.store_dsn, busy_timeout=cfg.db_busy_timeout)
+        app.state.store = store
+    log.info("store ready: %s", store.backend)
     yield
 
 app = FastAPI(title="slack-runtests-edge", lifespan=_startup_gate)

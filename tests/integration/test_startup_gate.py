@@ -85,6 +85,13 @@ def _launch(app: str, overrides: dict[str, str], tmp_path, *, until: str,
     env.update(overrides)
 
     process = subprocess.Popen(
+        # NO --log-level here, deliberately. `uvicorn --log-level info`
+        # configures uvicorn's OWN loggers and nothing else, so it does not fix
+        # this and would only hide that it does not: an application logger with
+        # no handler falls back to `lastResort`, which emits WARNING and above,
+        # so every INFO line goes nowhere. `logsetup.ensure_configured()` in the
+        # app's lifespan is what makes them appear, and this launch is exactly
+        # the case it exists for.
         [sys.executable, "-m", "uvicorn", app, "--host", "127.0.0.1", "--port", "0"],
         env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
         start_new_session=True,
@@ -225,3 +232,49 @@ def test_run_sh_leaves_a_fully_configured_start_alone(tmp_path) -> None:
     assert STARTED in output, output[-2000:]
     assert "NOT PROTECTING ANYTHING" not in output
     assert "RUNTESTS_INSECURE_DEV" not in output
+
+
+# ── a store that cannot be opened must refuse to start ───────────────────────
+#
+# Found by planting a defect in the embedded example: a Postgres DSN whose
+# password was not URL-encoded. The edge started, answered /healthz, logged
+# `store: postgres`, and returned 500 to the first Slack command — the failure
+# arriving in front of a user, hours later, reading as the bot being broken.
+#
+# Two things were wrong and both were about honesty rather than connectivity.
+# The store was opened lazily, on the first request. And the startup line
+# reported the CONFIGURED backend, so it said `postgres` about a database it had
+# never reached — a line whose only job is to distinguish a working Postgres
+# from a silent fallback, and which could not.
+
+@pytest.mark.parametrize("app", APPS)
+def test_an_unreachable_store_refuses_to_start(app: str, tmp_path) -> None:
+    dsn = "postgresql://nobody:nothing@127.0.0.1:1/nonexistent?connect_timeout=2"
+    output = _launch(app, {
+        "SLACK_SIGNING_SECRET": "s3cr3t",
+        "SLACK_TEAM_ID": "T_ALLOWED",
+        "RUNTESTS_CHANNELS": "C_ALLOWED",
+        "EDGE_DB_DSN": dsn,
+        "RUNTESTS_DB_DSN": dsn,
+    }, tmp_path, until=REFUSED, expect_exit=True, deadline=90)
+
+    assert REFUSED in output, output[-2000:]
+    assert STARTED not in output, "it must not have opened a socket first"
+    assert "cannot reach the Postgres store" in output, output[-2000:]
+
+
+@pytest.mark.parametrize("app", APPS)
+def test_the_store_that_was_OPENED_is_the_one_reported(app: str, tmp_path) -> None:
+    """`store configured:` is an intention; `store ready:` is a fact.
+
+    They are different strings on purpose. Only the second is written after
+    something was actually opened, and only the second is what the deployment
+    scripts assert.
+    """
+    output = _launch(app, {
+        "SLACK_SIGNING_SECRET": "s3cr3t",
+        "SLACK_TEAM_ID": "T_ALLOWED",
+        "RUNTESTS_CHANNELS": "C_ALLOWED",
+    }, tmp_path, until=STARTED)
+
+    assert "store ready: sqlite" in output, output[-2000:]

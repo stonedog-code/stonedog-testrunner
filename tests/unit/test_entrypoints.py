@@ -64,7 +64,7 @@ def test_the_v1_server_warns_about_slack_before_it_starts_serving(
     )
 
 
-def test_the_edge_announces_which_store_it_opened_before_serving(
+def test_the_edge_announces_which_store_it_was_configured_with(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, tmp_path
 ) -> None:
     """Same lesson, second surface — and the two backends fail in opposite ways.
@@ -73,6 +73,12 @@ def test_the_edge_announces_which_store_it_opened_before_serving(
     on the next redeploy. A Postgres DSN that quietly fell back to a file would
     look identical in every log line that follows. Neither failure announces
     itself, so the startup line is the only place the difference is visible.
+
+    Note the wording: this line reports what was CONFIGURED. `store ready:` —
+    logged by the app's lifespan once a store has actually been opened — is the
+    one that reports reality, and the two are deliberately different strings.
+    An earlier version had only this line and said `store: postgres` for a DSN
+    that could not be reached at all.
     """
     import uvicorn
 
@@ -86,7 +92,7 @@ def test_the_edge_announces_which_store_it_opened_before_serving(
         assert entry.main() == 0
 
     messages = [r.getMessage() for r in caplog.records]
-    assert any(m.startswith("store: sqlite") for m in messages), messages
+    assert any(m.startswith("store configured: sqlite") for m in messages), messages
     assert any("caps:" in m for m in messages), messages
 
 

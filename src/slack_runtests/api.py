@@ -23,6 +23,7 @@ from fastapi.responses import JSONResponse
 
 from . import gate
 from .authz import refuse_or_warn
+from .logsetup import ensure_configured
 from .config import Config, load
 from .runners import github as github_runner
 from .runners import local as local_runner
@@ -44,6 +45,10 @@ async def _startup_gate(app: FastAPI):
 
     One decision (`refuse_or_warn`), two call sites, on purpose.
     """
+    # Before the first log line, and only if nothing else has: a bare
+    # `uvicorn module:app` leaves application loggers with no handler at
+    # all, so everything below would be written to nowhere.
+    ensure_configured()
     cfg = getattr(app.state, "config", None) or load()
     app.state.config = cfg
     refusal = refuse_or_warn(
@@ -65,6 +70,15 @@ async def _startup_gate(app: FastAPI):
             "refusing to start: required Slack protections are not configured "
             "(see the lines above)"
         )
+
+    # Opened before the socket, for the reason spelled out in the edge's copy: a
+    # store that cannot be opened otherwise 500s at the first Slack command
+    # rather than refusing to start.
+    store = getattr(app.state, "store", None)
+    if store is None:
+        store = open_store(cfg.store_dsn, busy_timeout=cfg.db_busy_timeout)
+        app.state.store = store
+    log.info("store ready: %s", store.backend)
     yield
 
 app = FastAPI(title="slack-runtests", lifespan=_startup_gate)

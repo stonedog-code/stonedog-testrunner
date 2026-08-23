@@ -27,7 +27,11 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile
-    command: ["uv", "run", "slack-runtests-edge"]
+      # The public process, from the target that has no pytest and no suite.
+      # Without `target:` a build takes the LAST stage in the file, so the edge
+      # would silently become a test-server image — which starts, serves, and
+      # differs only in what it is capable of.
+      target: edge
     ports:
       # The ONLY published port in this file.
       - "8500:8500"
@@ -74,7 +78,7 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile
-    command: ["uv", "run", "slack-runtests-runner"]
+      target: runner
     depends_on:
       edge:
         condition: service_healthy
