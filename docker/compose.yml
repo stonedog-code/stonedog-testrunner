@@ -34,7 +34,12 @@ services:
     environment:
       HOST: "0.0.0.0"
       PORT: "8500"
+      # SQLite, on a volume, because this compose file is the lab. A deployment
+      # whose container has no persistent volume must set EDGE_DB_DSN instead,
+      # or the queue and the whole run history are deleted on every redeploy —
+      # see the store section in the root README.
       EDGE_DB_PATH: /app/data/edge.db
+      EDGE_DB_DSN: "${EDGE_DB_DSN:-}"
       EDGE_KEY_PATH: /app/keys/edge_ed25519.pem
       # A lab bootstrap token, so three fresh containers can enrol themselves
       # without an operator copying keys in. Production pre-authorises keys

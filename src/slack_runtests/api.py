@@ -23,21 +23,35 @@ from . import gate
 from .config import Config, load
 from .runners import github as github_runner
 from .runners import local as local_runner
+from .store import EnqueueResult, Job, JobStore, StoreBusy, open_store
 
 log = logging.getLogger(__name__)
 
 app = FastAPI(title="slack-runtests")
 
-#: In-memory record of what has been dispatched, so `results` can answer and so
-#: a Slack retry does not start a second run. A real deployment needs this in
-#: Redis or Postgres — an in-process dict is per-worker, so two uvicorn workers
-#: would each have their own and the idempotency guarantee quietly disappears.
-_RUNS: dict[str, dict] = {}
-
 
 def _config(request: Request) -> Config:
     """Config per request, so tests can override it on app.state."""
     return getattr(request.app.state, "config", None) or load()
+
+
+def _store(request: Request) -> JobStore:
+    """The record of what has been dispatched — durable, and shared across workers.
+
+    This used to be `_RUNS`, a module-level dict, and the README said in as many
+    words what was wrong with it: an in-process structure is per-worker, so two
+    uvicorn workers each kept their own and the idempotency guarantee quietly
+    disappeared. It also vanished on restart, which meant `results` could answer
+    "no recorded run" about a suite that had just finished.
+
+    Same store as the edge, same default (a SQLite file), same DSN escape hatch.
+    """
+    store = getattr(request.app.state, "store", None)
+    if store is None:
+        cfg = _config(request)
+        store = open_store(cfg.store_dsn, busy_timeout=cfg.db_busy_timeout)
+        request.app.state.store = store
+    return store
 
 
 def ephemeral(text: str) -> JSONResponse:
@@ -97,26 +111,41 @@ async def commands(request: Request, background: BackgroundTasks) -> JSONRespons
 
     channel = str(form.get("channel_name") or form.get("channel_id") or cfg.default_channel)
 
+    store = _store(request)
+
     if args.action == "results":
-        run = _RUNS.get(correlation_id) or _last_run_for(args.product)
+        run = store.job(correlation_id) or store.last_for(args.product)
         if not run:
             return ephemeral(f"No recorded run for `{args.product}` yet.")
+        started = run.get("started_at") or run["created_at"]
         return ephemeral(
             f"Last `{run['product']}` run on `{run['server']}` — "
-            f"id `{run['correlation_id']}`, started {int(time.time() - run['started'])}s ago, "
-            f"mode `{run['mode']}`."
+            f"id `{run['id']}`, started {int(time.time() - started)}s ago, "
+            f"mode `{run['dispatch_mode'] or cfg.mode}`."
         )
 
-    if correlation_id in _RUNS:
-        return ephemeral(f"That run is already queued (`{correlation_id}`).")
+    try:
+        outcome = store.record_dispatch(
+            Job(
+                id=correlation_id,
+                product=args.product,
+                server=args.server,
+                select_expr=args.select,
+                marker=args.marker,
+                slack_channel=channel,
+                slack_user=str(form.get("user_id", "")),
+            ),
+            mode=cfg.mode,
+            caps=cfg.caps,
+        )
+    except StoreBusy:
+        # A refusal, not a fault. Answering 500 would make Slack show its own
+        # generic failure, which reads to the user as the bot being down.
+        log.warning("store busy while recording %s", correlation_id)
+        return ephemeral("⚠️ The runner is busy right now — try that again in a moment.")
 
-    _RUNS[correlation_id] = {
-        "correlation_id": correlation_id,
-        "product": args.product,
-        "server": args.server,
-        "started": time.time(),
-        "mode": cfg.mode,
-    }
+    if outcome is not EnqueueResult.ACCEPTED:
+        return ephemeral(_refusal(outcome, correlation_id, args.product, channel))
 
     # 5. Dispatch in the background and answer immediately.
     if cfg.mode == "github":
@@ -152,6 +181,28 @@ async def commands(request: Request, background: BackgroundTasks) -> JSONRespons
     )
 
 
-def _last_run_for(product: str) -> dict | None:
-    matches = [r for r in _RUNS.values() if r["product"] == product]
-    return max(matches, key=lambda r: r["started"]) if matches else None
+def _refusal(outcome: EnqueueResult, run_id: str, product: str, channel: str) -> str:
+    """Say which limit was hit, in the user's terms.
+
+    A duplicate and a cap refusal are different facts and must not share a
+    message: one means "you already asked for this", the other "too much of this
+    is already happening". Telling somebody the wrong one sends them looking in
+    the wrong place, and a cap that reads as a bug gets raised as one.
+    """
+    if outcome is EnqueueResult.DUPLICATE:
+        return f"That run is already queued (`{run_id}`)."
+    if outcome is EnqueueResult.JOB_AT_CAPACITY:
+        return (
+            f"⚠️ `{product}` is already running. Wait for it to finish, or ask "
+            f"for `results -p {product}`."
+        )
+    if outcome is EnqueueResult.CHANNEL_BUSY:
+        return (
+            f"⚠️ {channel} already has as many runs going at once as it is "
+            f"allowed. Wait for one to finish."
+        )
+    if outcome is EnqueueResult.CHANNEL_QUEUE_FULL:
+        return (
+            f"⚠️ {channel} already has as many runs waiting as it is allowed to queue."
+        )
+    return f"Could not queue that run (`{run_id}`)."

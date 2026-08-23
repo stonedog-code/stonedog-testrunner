@@ -7,6 +7,7 @@
 #     bash run.sh runner             # V3: a test server, dialling out to the edge
 #     bash run.sh test               # this project's own unit suite
 #     bash run.sh test:integration   # the integration tier (starts an edge itself)
+#     bash run.sh test:conformance   # the store suite, against every backend
 #     bash run.sh docker             # edge + three test servers, in containers
 #
 # Environment passes through, so the V2 mode still works the documented way:
@@ -52,6 +53,14 @@ case "$cmd" in
   test)
     exec uv run pytest "$@"
     ;;
+  test:conformance)
+    # The store suite alone, so it can be pointed at a database and re-run
+    # without waiting for everything else. It runs in `test` as well, against
+    # SQLite; TESTRUNNER_TEST_POSTGRES_DSN is what adds the Postgres parameter,
+    # and TESTRUNNER_REQUIRED_BACKENDS is what makes a missing one a FAILURE
+    # rather than a suite that silently covers half of what it claims to.
+    exec uv run pytest tests/conformance "$@"
+    ;;
   test:integration)
     # A separate path because these spawn a real uvicorn process and talk to it
     # over a real socket. They are excluded from `testpaths` so the fast unit
@@ -62,7 +71,7 @@ case "$cmd" in
     exec docker compose -f docker/compose.yml "${@:-up}" 
     ;;
   *)
-    printf 'usage: %s [serve|edge|runner|test|test:integration|docker] [args...]\n' "$0" >&2
+    printf 'usage: %s [serve|edge|runner|test|test:conformance|test:integration|docker] [args...]\n' "$0" >&2
     exit 2
     ;;
 esac

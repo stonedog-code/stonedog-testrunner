@@ -37,10 +37,10 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response
 
 from slack_runtests import gate, identity
+from slack_runtests.store import EnqueueResult, Job, JobStore, StoreBusy, open_store
 
 from . import auth
 from .config import EdgeConfig, load
-from .store import Job, Store
 
 log = logging.getLogger(__name__)
 
@@ -62,10 +62,11 @@ def _config(request: Request) -> EdgeConfig:
     return cfg
 
 
-def _store(request: Request) -> Store:
+def _store(request: Request) -> JobStore:
     store = getattr(request.app.state, "store", None)
     if store is None:
-        store = Store(_config(request).db_path)
+        cfg = _config(request)
+        store = open_store(cfg.store_dsn, busy_timeout=cfg.db_busy_timeout)
         request.app.state.store = store
     return store
 
@@ -219,8 +220,19 @@ async def slack_commands(request: Request) -> JSONResponse:
         slack_channel=channel,
         slack_user=str(form.get("user_id", "")),
     )
-    if not store.enqueue(job):
-        return ephemeral(f"That run is already queued (`{job_id}`).")
+    try:
+        outcome = store.enqueue(job, caps=cfg.caps)
+    except StoreBusy:
+        # A refusal, not a fault. SQLite serialises writers, so a burst of
+        # commands produces a lock timeout — and a 500 here would make Slack
+        # show its generic failure, which reads to the user as the bot being
+        # down rather than as "ask again in a second".
+        log.warning("store busy while queueing %s", job_id)
+        return ephemeral(
+            "⚠️ The runner is busy right now — try that again in a moment."
+        )
+    if outcome is not EnqueueResult.ACCEPTED:
+        return ephemeral(_refusal(outcome, job_id, args.product, channel))
 
     # Tell the user now if nothing can pick this up. The edge cannot post to
     # Slack — every channel message comes from a test server — so this
@@ -238,6 +250,34 @@ async def slack_commands(request: Request) -> JSONResponse:
         f"⏳ Queued `{args.product}` on `{args.server}` (`{job_id}`) — "
         f"{len(eligible)} test server(s) available. Results will post to {channel}."
     )
+
+
+def _refusal(outcome: EnqueueResult, job_id: str, product: str, channel: str) -> str:
+    """Say which limit was hit, in the user's terms.
+
+    A cap refusal and a duplicate are different facts and must not share a
+    message: one means "you already asked for this", the other means "too much
+    of this is already happening". Telling somebody the wrong one sends them
+    looking in the wrong place, and a cap that reads as a bug gets raised as one.
+    """
+    if outcome is EnqueueResult.DUPLICATE:
+        return f"That run is already queued (`{job_id}`)."
+    if outcome is EnqueueResult.JOB_AT_CAPACITY:
+        return (
+            f"⚠️ `{product}` is already running. Wait for it to finish, or "
+            f"ask for `results -p {product}`."
+        )
+    if outcome is EnqueueResult.CHANNEL_QUEUE_FULL:
+        return (
+            f"⚠️ {channel} already has as many runs waiting as it is allowed to "
+            f"queue. They will clear as test servers pick them up."
+        )
+    if outcome is EnqueueResult.CHANNEL_BUSY:
+        return (
+            f"⚠️ {channel} already has as many runs going at once as it is "
+            f"allowed. Wait for one to finish."
+        )
+    return f"Could not queue that run (`{job_id}`)."
 
 
 def _describe(record: dict) -> str:
@@ -383,15 +423,29 @@ async def claim(request: Request) -> Response:
     deadline = time.monotonic() + cfg.poll_timeout
 
     while True:
-        job = await asyncio.to_thread(
-            store.claim, row["runner_id"], labels, cfg.lease_seconds, cfg.max_attempts
-        )
+        try:
+            job = await asyncio.to_thread(
+                _claim_once, store, row["runner_id"], labels, cfg
+            )
+        except StoreBusy:
+            # Contention, not an outage. A long-poll that answered 503 here
+            # would teach a test server to back off from a store that is simply
+            # busy — the right response is to ask again on the next tick.
+            log.info("store busy while %s polled for work", row["runner_id"])
+            job = None
         if job is not None:
             log.info("job %s -> %s", job.id, row["runner_id"])
             return signed(request, job.as_dispatch())
         if time.monotonic() >= deadline:
             return signed(request, None, status=204)
         await asyncio.sleep(POLL_INTERVAL)
+
+
+def _claim_once(store: JobStore, runner_id: str, labels: list[str], cfg: EdgeConfig) -> Job | None:
+    """One claim attempt, on a worker thread. Split out so it can be named in a trace."""
+    return store.claim(
+        runner_id, labels, cfg.lease_seconds, cfg.max_attempts, caps=cfg.caps
+    )
 
 
 @app.post("/runner/jobs/{job_id}/started")
@@ -402,7 +456,10 @@ async def started(job_id: str, request: Request) -> Response:
         return refusal
     assert row is not None
 
-    ok = _store(request).mark_running(job_id, row["runner_id"])
+    try:
+        ok = _store(request).mark_running(job_id, row["runner_id"])
+    except StoreBusy:
+        return _busy_response(request)
     return signed(request, {"ok": ok}, status=200 if ok else 409)
 
 
@@ -424,19 +481,33 @@ async def result(job_id: str, request: Request) -> Response:
     except ValueError:
         return JSONResponse({"error": "bad request"}, status_code=400)
 
-    ok = _store(request).finish(
-        job_id,
-        row["runner_id"],
-        exit_code=int(payload.get("exit_code", 1)),
-        passed=int(payload.get("passed", 0)),
-        failed=int(payload.get("failed", 0)),
-        skipped=int(payload.get("skipped", 0)),
-        duration=float(payload.get("duration", 0.0)),
-        summary=str(payload.get("summary", ""))[:2000],
-    )
+    try:
+        ok = _store(request).finish(
+            job_id,
+            row["runner_id"],
+            exit_code=int(payload.get("exit_code", 1)),
+            passed=int(payload.get("passed", 0)),
+            failed=int(payload.get("failed", 0)),
+            skipped=int(payload.get("skipped", 0)),
+            duration=float(payload.get("duration", 0.0)),
+            summary=str(payload.get("summary", "")),
+        )
+    except StoreBusy:
+        # 503 with a Retry-After, deliberately: this is the one call carrying
+        # information the edge cannot reconstruct. Answering 200 would throw a
+        # real result away, and answering 500 would tell the test server the
+        # payload was bad when it was fine.
+        return _busy_response(request)
     if not ok:
         log.warning("rejected result for %s from %s — not its job", job_id, row["runner_id"])
     return signed(request, {"ok": ok}, status=200 if ok else 409)
+
+
+def _busy_response(request: Request) -> Response:
+    """Tell a test server to come back, in the one word HTTP has for it."""
+    response = signed(request, {"error": "busy"}, status=503)
+    response.headers["Retry-After"] = "2"
+    return response
 
 
 # ── operator view ────────────────────────────────────────────────────────────

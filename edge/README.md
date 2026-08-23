@@ -72,7 +72,12 @@ customer, so leaving them empty is a decision, not a default to inherit.
 
 | Variable | Default | What it does |
 |---|---|---|
-| `EDGE_DB_PATH` | `data/edge.db` | SQLite file holding the queue and the registry. |
+| `EDGE_DB_PATH` | `data/edge.db` | SQLite file holding the queue and the registry. **The default, and the reason a standalone edge needs no database.** |
+| `EDGE_DB_DSN` | *(empty)* | The **only** way to select Postgres — `postgresql://user:pass@host/db`. Wins over `EDGE_DB_PATH` when set. Needs the `postgres` extra (`uv sync --extra postgres`). |
+| `EDGE_DB_BUSY_TIMEOUT` | `5` | How long a write waits for a lock before the caller is told the runner is busy. Bounded inside Slack's three-second budget on purpose. |
+| `RUNTESTS_MAX_ACTIVE_PER_JOB` | `1` | Runs of the same (product, server) in flight at once. `0` disables. |
+| `RUNTESTS_MAX_QUEUED_PER_CHANNEL` | `10` | Waiting runs one channel may have. `0` disables. |
+| `RUNTESTS_MAX_RUNNING_PER_CHANNEL` | `3` | Runs of one channel executing at once. `0` disables. |
 | `RUNNER_HEARTBEAT_INTERVAL` | `30` | How often a test server must check in. |
 | `RUNNER_OFFLINE_AFTER` | `90` | No heartbeat for this long ⇒ marked offline and handed no new work. |
 | `JOB_LEASE_SECONDS` | `120` | How long a claim is good for. Four heartbeats fit inside it, so a live server renews well before it could be declared dead. |
@@ -173,8 +178,17 @@ Every `/runner/*` **reply** carries `X-Edge-Timestamp` and `X-Edge-Signature`.
 
 - With no `SLACK_SIGNING_SECRET` the edge accepts unverified requests and warns
   on every one. Deliberate, documented, and refused as soon as a secret is set.
-- SQLite is right for one edge process and a handful of test servers. Multiple
-  edge *hosts* sharing a queue would want Postgres; the `Store` interface is the
-  seam where that swap happens.
+- SQLite is right for one edge process and a handful of test servers, and it is
+  the default for exactly that reason. **Set `EDGE_DB_DSN` when the process has
+  no durable disk** — a container service with no persistent volume deletes the
+  file on every redeploy, along with the queue, the in-flight leases and the
+  whole run history — **or when more than one edge process shares a queue.**
+  SQLite also has one writer, so a burst of commands produces a bounded wait and
+  then an honest "the runner is busy"; Postgres has no such limit.
+- **The two backends are one interface and one test suite.** `tests/conformance`
+  runs every guarantee against both, and CI stands up a real Postgres to do it.
+  A backend that silently fails to claim atomically is precisely what a
+  single-backend suite cannot see — measured, not assumed: the first run of that
+  suite found the Postgres cap letting four rows through where SQLite let three.
 - There is no TLS here. Terminate it in front — see the `Gate 0` note in the
   architecture diagram.
