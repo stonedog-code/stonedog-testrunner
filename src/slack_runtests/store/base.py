@@ -168,6 +168,18 @@ class Job:
     slack_channel: str
     slack_user: str
 
+    #: Which DEFINITION produced this run, when one did (NEH-1167).
+    #:
+    #: Optional, and it must stay optional. Runs recorded before definitions
+    #: existed have none, and a migration that made this required would make
+    #: every one of them unreadable — the history is the thing being preserved.
+    #:
+    #: NOT a foreign key with a cascade. The run happened; deleting its
+    #: definition must not erase the record of what it did. An orphaned id is
+    #: correct, and a reader says "the definition is gone" rather than hiding
+    #: the run.
+    job_def_id: str | None = None
+
     def as_dispatch(self) -> dict[str, Any]:
         """The shape handed to a test server. Deliberately minimal.
 
@@ -495,6 +507,17 @@ class JobStore(ABC):
 
     @abstractmethod
     def recent(self, limit: int = 20) -> list[dict[str, Any]]: ...
+
+    @abstractmethod
+    def runs_for_job_def(self, job_def_id: str, limit: int = 20) -> list[dict[str, Any]]:
+        """This definition's runs, newest first.
+
+        Matched on `job_def_id` and nothing else. The tempting approximation --
+        match on product and server -- is WRONG rather than absent: two
+        definitions differing only in `test_scope` would share a history
+        belonging to neither, and a History table showing the wrong runs looks
+        exactly like one showing the right runs.
+        """
 
     @abstractmethod
     def last_for(self, product: str) -> dict[str, Any] | None: ...

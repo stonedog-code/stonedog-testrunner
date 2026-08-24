@@ -279,3 +279,24 @@ def test_a_deleted_trigger_is_free_again(client: TestClient) -> None:
 
 def test_an_unknown_id_reads_as_404(client: TestClient) -> None:
     assert client.get("/admin/jobs/nope", headers=AUTH).status_code == 404
+
+
+# ── history (NEH-1167) ──────────────────────────────────────────────────────
+
+def test_history_needs_the_token_like_everything_else(client: TestClient) -> None:
+    assert client.get("/admin/jobs/j1/runs").status_code == 404
+
+
+def test_an_unknown_definition_404s_rather_than_returning_an_empty_history(
+    client: TestClient,
+) -> None:
+    """A definition that does not exist and one that has never run are
+    different facts. An empty history is an ordinary state for a new job, so
+    answering `[]` for a typo would read as "this job has never run"."""
+    assert client.get("/admin/jobs/nope/runs", headers=AUTH).status_code == 404
+
+
+def test_a_new_definition_has_an_empty_history_with_a_count(client: TestClient) -> None:
+    client.put("/admin/jobs/j1", json=a_job(), headers=AUTH)
+    body = client.get("/admin/jobs/j1/runs", headers=AUTH).json()
+    assert body == {"count": 0, "runs": []}

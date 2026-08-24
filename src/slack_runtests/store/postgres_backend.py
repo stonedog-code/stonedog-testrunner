@@ -74,6 +74,10 @@ CREATE TABLE IF NOT EXISTS runners (
 
 CREATE TABLE IF NOT EXISTS jobs (
     id            TEXT PRIMARY KEY,
+    -- Which DEFINITION produced this run, when one did. Nullable on purpose,
+    -- and no foreign key: deleting a definition must not erase the record of
+    -- what it did.
+    job_def_id    TEXT,
     product       TEXT NOT NULL,
     server        TEXT NOT NULL,
     select_expr   TEXT,
@@ -134,6 +138,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS job_defs_trigger
 #: suite, which asserts both backends expose the same columns.
 _MIGRATIONS = (
     "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS dispatch_mode TEXT NOT NULL DEFAULT ''",
+    # Nullable, so rows written before definitions existed keep their history.
+    "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS job_def_id TEXT",
 )
 
 #: Advisory locks are keyed by two 32-bit integers. The first is a namespace
@@ -145,7 +151,7 @@ _LOCK_CLAIM = 2
 
 _JOB_COLUMNS = (
     "id, product, server, select_expr, marker, slack_channel, slack_user, "
-    "created_at, state, dispatch_mode, started_at"
+    "created_at, state, dispatch_mode, started_at, job_def_id"
 )
 
 
@@ -351,10 +357,11 @@ class PostgresStore(JobStore):
             # turns caps off.
             cur.execute(
                 f"INSERT INTO jobs ({_JOB_COLUMNS}) "
-                f"VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+                f"VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
                 f"ON CONFLICT (id) DO NOTHING",
                 (job.id, job.product, job.server, job.select_expr, job.marker,
-                 job.slack_channel, job.slack_user, now, state, mode, started),
+                 job.slack_channel, job.slack_user, now, state, mode, started,
+                 job.job_def_id),
             )
             return EnqueueResult.ACCEPTED if cur.rowcount == 1 else EnqueueResult.DUPLICATE
 
@@ -504,6 +511,14 @@ class PostgresStore(JobStore):
         with self._cursor() as cur:
             cur.execute("SELECT * FROM jobs ORDER BY created_at DESC LIMIT %s", (limit,))
             return list(cur.fetchall())
+
+    def runs_for_job_def(self, job_def_id: str, limit: int = 20) -> list[dict[str, Any]]:
+        with self._cursor() as cur:
+            cur.execute(
+                "SELECT * FROM jobs WHERE job_def_id = %s ORDER BY created_at DESC LIMIT %s",
+                (job_def_id, limit),
+            )
+            return [dict(r) for r in cur.fetchall()]
 
     def last_for(self, product: str) -> dict[str, Any] | None:
         with self._cursor() as cur:

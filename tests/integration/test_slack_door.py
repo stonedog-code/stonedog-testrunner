@@ -22,10 +22,11 @@ here so nobody reads these three as covering it.
 
 from __future__ import annotations
 
+import json
 import time
 
 import pytest
-from harness import post, slack_body
+from harness import TEST_ADMIN_TOKEN, post, slack_body
 
 pytestmark = pytest.mark.integration
 
@@ -260,3 +261,31 @@ def test_a_queued_test_server_job_is_not_reported_as_never_started(edge) -> None
     text = post(edge, slack_body("results -p catalog -s staging")).json()["text"]
     assert "never started" not in text, text
     assert "queued" in text, text
+
+
+# ── 7. a command's run appears in ITS definition's history (NEH-1167) ───────
+
+
+def test_a_command_records_which_definition_produced_the_run(edge) -> None:
+    """The link, proven where it is actually made.
+
+    The store's own tests prove it can HOLD a `job_def_id`; they say nothing
+    about whether the edge sets one. Planting `job_def_id=None` in the command
+    handler passed every store test — this is the assertion that catches it.
+
+    Read back through the admin API rather than the database, because that is
+    the path the tab uses and the one that has to be right.
+    """
+    import urllib.request
+
+    post(edge, slack_body("-p catalog -s staging", trigger_id="linked-run-1"))
+
+    request = urllib.request.Request(
+        f"{edge.url}/admin/jobs/jd-catalog-staging-smoke/runs",
+        headers={"Authorization": f"Bearer {TEST_ADMIN_TOKEN}"},
+    )
+    with urllib.request.urlopen(request, timeout=10) as response:
+        body = json.loads(response.read())
+
+    assert body["count"] >= 1, body
+    assert any(run["job_def_id"] == "jd-catalog-staging-smoke" for run in body["runs"]), body
