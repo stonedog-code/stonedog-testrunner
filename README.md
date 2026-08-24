@@ -358,6 +358,35 @@ bash docker/smoke.sh        # 15 checks over both images
 bash examples/verify.sh     # 12 checks, both examples up for real
 ```
 
+## Logging
+
+Every process — the edge, the V1/V2 API and the test servers — logs through
+[`stonedog-logs`](https://pypi.org/project/stonedog-logs/), so one format and
+one service tag cover the fleet and there is no `basicConfig` repeated in three
+entry points with three chances to drift.
+
+| Variable | Default | What it does |
+|---|---|---|
+| `LOG_LEVEL` | `INFO` | Standard level name. |
+| `STONEDOG_LOGS_LEVEL` | *(unset)* | Same, and wins where both are set. |
+| `STONEDOG_LOGS_SERVICE_NAME` | per process | Overrides the tag on every line — `slack-runtests-edge`, `slack-runtests`, `slack-runtests-runner`. |
+| `STONEDOG_LOGS_JSON` | *(unset)* | `1` switches the whole fleet to JSON lines, with no code change. |
+| `STONEDOG_LOGS_OTLP_ENDPOINT` | *(unset)* | Ship logs to an OTLP collector (Seq and friends). Needs the package's `otlp` extra. |
+| `STONEDOG_LOGS_OTLP_HEADERS` | *(unset)* | `k=v,k=v` — an API key for that collector. |
+
+**These are read by the package, not by this repo**, and that distinction is
+enforced: `tests/unit/test_docs_match_the_code.py` keeps a named
+`READ_BY_A_DEPENDENCY` set, because a setting an operator can use is worth
+documenting whether or not a line of code here reads it — and nothing in this
+codebase would otherwise remind anyone it exists.
+
+**The apps configure logging only if nothing else has.** A bare `uvicorn
+module:app` leaves application loggers with no handler at all, so startup lines
+like `store ready:` go nowhere — and `uvicorn --log-level info` does not fix it,
+because that configures uvicorn's own loggers. `configure(...,
+only_if_unconfigured=True)` covers it without overriding a host process that has
+already set logging up.
+
 ## The store — a file by default, Postgres by DSN
 
 The queue, the test-server registry and the record of what has been dispatched

@@ -40,13 +40,16 @@ from fastapi.responses import JSONResponse, Response
 
 from slack_runtests import gate, identity
 from slack_runtests.authz import refuse_or_warn
-from slack_runtests.logsetup import ensure_configured
+from stonedog_logs import configure as configure_logging
 from slack_runtests.store import EnqueueResult, Job, JobStore, StoreBusy, open_store
 
 from . import auth
 from .config import EdgeConfig, load
 
 log = logging.getLogger(__name__)
+
+#: What every log line from this process is tagged with.
+SERVICE_NAME = "slack-runtests-edge"
 
 
 @asynccontextmanager
@@ -64,8 +67,11 @@ async def _startup_gate(app: FastAPI):
     """
     # Before the first log line, and only if nothing else has: a bare
     # `uvicorn module:app` leaves application loggers with no handler at
-    # all, so everything below would be written to nowhere.
-    ensure_configured()
+    # all, so everything below would be written to nowhere. `uvicorn
+    # --log-level info` does NOT fix that — it configures uvicorn's own
+    # loggers, and an application logger with no handler falls back to
+    # `lastResort`, which emits WARNING and above.
+    configure_logging(service_name=SERVICE_NAME, only_if_unconfigured=True)
     cfg = getattr(app.state, "config", None) or load()
     app.state.config = cfg
     refusal = refuse_or_warn(

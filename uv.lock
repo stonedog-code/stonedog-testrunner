@@ -535,6 +535,7 @@ dependencies = [
     { name = "cryptography" },
     { name = "fastapi" },
     { name = "httpx" },
+    { name = "stonedog-logs" },
     { name = "uvicorn" },
 ]
 
@@ -559,6 +560,7 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.28.0" },
     { name = "psycopg", extras = ["binary"], marker = "extra == 'postgres'", specifier = ">=3.2.0" },
     { name = "psycopg-pool", marker = "extra == 'postgres'", specifier = ">=3.2.0" },
+    { name = "stonedog-logs", specifier = ">=0.3.0" },
     { name = "uvicorn", specifier = ">=0.52.4" },
 ]
 provides-extras = ["postgres"]
@@ -582,6 +584,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/b5/b4/205b0d5241d934e8add0c38aa924c4f9fb7330834ff11e5444db964ec3f9/starlette-1.6.0.tar.gz", hash = "sha256:d4e3ac5e546444960c710297a3c9fc3f7ebae1b7e963f3d36173b49da535be9b", size = 2716969, upload-time = "2026-08-08T18:27:57.512Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/c8/cb/6a6a47d5b464bd08695d254f3da6e7986cc70c9fa5d778eda57538edfe56/starlette-1.6.0-py3-none-any.whl", hash = "sha256:a86dd39d14bb45f85a3d18525215a9ef0cfd1f192ac793220e72598c90335f0c", size = 75969, upload-time = "2026-08-08T18:27:56.196Z" },
+]
+
+[[package]]
+name = "stonedog-logs"
+version = "0.3.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/71/8a/9f28a1336d003293036d7a14294eae08bf86b7c629dc48775f363bda78c4/stonedog_logs-0.3.0.tar.gz", hash = "sha256:f6030aebb32aa6a508fff082a5582ffcc6892ee84096f6c561dece90e537feb9", size = 14529, upload-time = "2026-08-24T00:39:36.928Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/78/ff/8e8741eda0fffda620e2dbc9c5fe940a5e574b2cac777b63ffe5d99fbb76/stonedog_logs-0.3.0-py3-none-any.whl", hash = "sha256:af071fb407dbdb459d560f0ce209d889c2cb3ddcf57ae2bb593256b00d568067", size = 16478, upload-time = "2026-08-24T00:39:35.949Z" },
 ]
 
 [[package]]

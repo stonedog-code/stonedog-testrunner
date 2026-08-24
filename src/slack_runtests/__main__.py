@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import logging
 import os
+
+from stonedog_logs import configure
 import sys
 
 from .authz import refuse_or_warn
@@ -14,10 +16,12 @@ from .slack import announce_configuration
 def main() -> int:
     import uvicorn
 
-    logging.basicConfig(
-        level=os.environ.get("LOG_LEVEL", "INFO"),
-        format="%(levelname)-8s %(name)s: %(message)s",
-    )
+    # One line, one format, one service tag across the edge, the API and the
+    # test servers — which is the point of adopting a logging package rather
+    # than repeating `basicConfig` in three entry points with three chances to
+    # drift. STONEDOG_LOGS_JSON=1 switches the whole fleet to JSON without a
+    # code change.
+    configure(service_name='slack-runtests')
 
     # Say up front whether results will actually reach Slack. This server runs
     # the tests itself (V1) and reports through SlackNotifier, so an operator

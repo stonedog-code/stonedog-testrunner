@@ -89,8 +89,8 @@ def _launch(app: str, overrides: dict[str, str], tmp_path, *, until: str,
         # configures uvicorn's OWN loggers and nothing else, so it does not fix
         # this and would only hide that it does not: an application logger with
         # no handler falls back to `lastResort`, which emits WARNING and above,
-        # so every INFO line goes nowhere. `logsetup.ensure_configured()` in the
-        # app's lifespan is what makes them appear, and this launch is exactly
+        # so every INFO line goes nowhere. `stonedog_logs.configure(only_if_unconfigured=True)`
+        # in the app's lifespan is what makes them appear, and this launch is exactly
         # the case it exists for.
         [sys.executable, "-m", "uvicorn", app, "--host", "127.0.0.1", "--port", "0"],
         env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,

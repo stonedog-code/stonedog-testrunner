@@ -71,12 +71,27 @@ ENV_EXAMPLE = re.compile(r"^(" + _NAME + r")=", re.MULTILINE)
 #: An exemption list is a place defects hide, so it is short, and every entry
 #: says why rather than simply naming a variable.
 UNDOCUMENTED_ON_PURPOSE = {
-    # The Python logging convention, not something this project defines.
-    "LOG_LEVEL": "the Python logging convention",
     # A test seam: it exists so the suite can point the Slack client at a local
     # server. Documenting it in a deployment table would invite somebody to set
     # it in one.
     "SLACK_API_BASE": "a test seam, never a deployment setting",
+}
+
+#: Documented here, read by a package this project depends on.
+#:
+#: This category appeared the moment logging moved to `stonedog-logs`. An
+#: operator still sets these — they are as real as any variable in this repo —
+#: but no line of code here reads them, so the "documented but never read" check
+#: would call them stale and the "read but undocumented" check would never see
+#: them at all. Dropping them from the tables instead would be the wrong fix: it
+#: would hide settings that work.
+READ_BY_A_DEPENDENCY = {
+    "LOG_LEVEL": "stonedog-logs",
+    "STONEDOG_LOGS_SERVICE_NAME": "stonedog-logs",
+    "STONEDOG_LOGS_LEVEL": "stonedog-logs",
+    "STONEDOG_LOGS_JSON": "stonedog-logs",
+    "STONEDOG_LOGS_OTLP_ENDPOINT": "stonedog-logs",
+    "STONEDOG_LOGS_OTLP_HEADERS": "stonedog-logs",
 }
 
 # HOST, PORT and RELOAD are uvicorn's own and are not matched at all — they
@@ -158,7 +173,7 @@ def test_every_documented_variable_is_actually_read() -> None:
     read, _ = _read_sources()
     documented, _ = _read_docs()
 
-    stale = sorted(documented - read)
+    stale = sorted(documented - read - set(READ_BY_A_DEPENDENCY))
     assert not stale, (
         f"{len(stale)} documented variable(s) are read by no code: {stale}. "
         f"Either the code was renamed and the docs were not, or the setting is gone."
@@ -172,3 +187,15 @@ def test_the_exemptions_are_all_still_real() -> None:
     read, _ = _read_sources()
     dead = sorted(set(UNDOCUMENTED_ON_PURPOSE) - read)
     assert not dead, f"exempted but no longer read anywhere: {dead}"
+
+
+def test_every_dependency_variable_is_documented() -> None:
+    """The other half of that category. A setting a dependency reads is one an
+    operator can set, so it is worth exactly as much documentation as ours —
+    and nothing in this repo's code would ever remind us it exists."""
+    documented, _ = _read_docs()
+    missing = sorted(set(READ_BY_A_DEPENDENCY) - documented)
+    assert not missing, (
+        f"{len(missing)} setting(s) read by a dependency are documented nowhere: "
+        f"{missing}"
+    )
