@@ -22,6 +22,8 @@ here so nobody reads these three as covering it.
 
 from __future__ import annotations
 
+import time
+
 import pytest
 from harness import post, slack_body
 
@@ -205,3 +207,56 @@ def test_slacks_retry_does_not_dispatch_the_workflow_a_second_time(edge) -> None
     # "Dispatching" here would mean two workflow runs from one command.
     assert "already queued" in second.json()["text"], second.json()["text"]
     assert "Dispatching" not in second.json()["text"]
+
+
+# ── 6. a dispatch that never happened must not read as queued (NEH-1156) ────
+
+
+def test_results_reports_a_run_that_never_started(edge) -> None:
+    """THE POINT OF NEH-1156, proven where a user would see it.
+
+    The dispatch happens in a background task, AFTER the ack has gone — so a
+    GitHub-side failure has no reply to travel back on, and the edge holds no
+    bot token to correct it with. Logging it was the whole of the old behaviour,
+    and a log is somewhere the person waiting cannot look: the run simply never
+    reported, which is silence reading as success.
+
+    This edge has no GITHUB_TOKEN, so the dispatch is a dry run — it makes no
+    request and reports not-ok, which is exactly the shape of a refused
+    dispatch. `results` must then say the run never started.
+
+    Asserted on what `results` SAYS, not on the log. A test reading the log
+    would pass over a message nobody sees, which is the defect rather than
+    the fix.
+    """
+    post(edge, slack_body("-p billing -s local", trigger_id="never-started-1"))
+
+    # `-s` is required on `results` too, because the grammar is one parser for
+    # every action even though `results` only reads the product. That is friction
+    # rather than a defect, and it is NEH-1166.
+
+    # The dispatch runs after the response, so the state lands a moment later.
+    for _ in range(50):
+        text = post(edge, slack_body("results -p billing -s local")).json()["text"]
+        if "never started" in text:
+            break
+        time.sleep(0.1)
+
+    assert "never started" in text, text
+    # And it does NOT read as a test failure. Somebody told "failed" goes
+    # looking for a broken test that does not exist.
+    assert "failed" not in text.lower(), text
+
+
+def test_a_queued_test_server_job_is_not_reported_as_never_started(edge) -> None:
+    """The other direction. A job waiting for a runner is still going to run,
+    and reporting it as never started would be the opposite lie."""
+    # `catalog`, not `webapp`: `last_for` looks up by PRODUCT ALONE, so a
+    # product that also has a gh-action job returns whichever run was most
+    # recent regardless of server. Using one here made this assert against the
+    # other test's dry-run dispatch — a fixture collision that reads as a bug in
+    # the code under test.
+    post(edge, slack_body("-p catalog -s staging", trigger_id="still-queued-1"))
+    text = post(edge, slack_body("results -p catalog -s staging")).json()["text"]
+    assert "never started" not in text, text
+    assert "queued" in text, text

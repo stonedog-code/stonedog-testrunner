@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Any, Iterable, Iterator
 
 from .base import (
+    NOT_DISPATCHED,
     JobDef,
     SaveResult,
     validate_job_def,
@@ -415,6 +416,29 @@ class SqliteStore(JobStore):
                 "WHERE id=? AND runner_id=? AND state IN (?,?)",
                 (state, now, exit_code, passed, failed, skipped, duration,
                  summary[:MAX_SUMMARY], job_id, runner_id, CLAIMED, RUNNING),
+            )
+            return cur.rowcount == 1
+
+    def mark_not_dispatched(self, job_id: str, reason: str,
+                            now: float | None = None) -> bool:
+        now = now_or(now)
+        with self._conn() as conn:
+        # THE GUARD IS `runner_id IS NULL`, not the state alone.
+        #
+        # `record_dispatch` inserts at RUNNING, not QUEUED -- there is no queue
+        # on the dispatch path -- so a `state = QUEUED` guard matches nothing
+        # and this call becomes a silent no-op. It did, in the first version,
+        # and only exercising it showed that.
+        #
+        # But RUNNING alone is too wide: a test-server job is RUNNING while a
+        # runner executes it, and marking that never-dispatched would overwrite
+        # somebody else's live work with a lie. A dispatched job has no runner,
+        # so `runner_id IS NULL` is what separates the two -- and it is in the
+        # WHERE clause rather than checked first so no path can skip it.
+            cur = conn.execute(
+                "UPDATE jobs SET state=?, finished_at=?, summary=?, lease_expires=NULL "
+                "WHERE id=? AND state IN (?,?) AND runner_id IS NULL",
+                (NOT_DISPATCHED, now, reason[:MAX_SUMMARY], job_id, QUEUED, RUNNING),
             )
             return cur.rowcount == 1
 

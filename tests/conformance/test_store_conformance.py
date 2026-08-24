@@ -17,7 +17,7 @@ import pytest
 
 from slack_runtests.store import (
     ABANDONED, CLAIMED, DONE, FAILED, NO_CAPS, QUEUED, RUNNING, Caps,
-    EnqueueResult, JobStore, SaveResult, StoreError,
+    EnqueueResult, JobStore, MAX_SUMMARY, NOT_DISPATCHED, SaveResult, StoreError,
 )
 
 pytestmark = pytest.mark.unit
@@ -721,3 +721,92 @@ def test_a_malformed_definition_is_refused_by_both_backends(
     with pytest.raises(StoreError):
         store.save_job_def(make_job_def(**{field: value}))
     assert store.count_job_defs() == 0
+
+
+# ── a dispatch that never happened (NEH-1156) ────────────────────────────────
+#
+# `not_dispatched` means the run NEVER STARTED. `failed` means it ran and did
+# not pass. Sharing one state would make every reader — `results`, the tab's
+# History — report the wrong one with complete confidence.
+
+
+def test_a_dispatched_job_can_be_marked_never_started(store: JobStore, make_job) -> None:
+    """The positive control, and the state the gh-action path actually uses.
+
+    `record_dispatch` inserts at RUNNING, not QUEUED — there is no queue on the
+    dispatch path. A guard written against QUEUED matches nothing and the whole
+    call becomes a silent no-op, which is what the first version of this did.
+    """
+    store.record_dispatch(make_job("gh-1"), mode="gh-action")
+    assert store.mark_not_dispatched("gh-1", "GitHub refused the run.") is True
+
+    record = store.job("gh-1")
+    assert record["state"] == NOT_DISPATCHED
+    assert record["summary"] == "GitHub refused the run."
+    assert record["finished_at"] is not None
+
+
+def test_it_is_terminal_so_a_late_failure_cannot_overwrite_a_result(
+    store: JobStore, make_job
+) -> None:
+    store.record_dispatch(make_job("gh-1"), mode="gh-action")
+    store.mark_not_dispatched("gh-1", "first")
+    assert store.mark_not_dispatched("gh-1", "second") is False
+    assert store.job("gh-1")["summary"] == "first"
+
+
+def test_a_job_a_RUNNER_holds_is_never_marked_never_started(
+    store: JobStore, make_job
+) -> None:
+    """THE GUARD THAT MATTERS. A test-server job is RUNNING while a runner
+    executes it, so a state-only check would let a stray dispatch failure
+    overwrite somebody else's live work with a lie.
+
+    `runner_id IS NULL` is what separates a dispatched job from a claimed one.
+    """
+    store.enqueue(make_job("q-1"))
+    claimed = store.claim("runner-1", [], 60, 3)
+    assert claimed is not None
+    # RUNNING, not merely claimed. A claimed job is excluded by the STATE list
+    # alone, so asserting against one proves nothing about `runner_id` — this
+    # test passed against a build with the runner check deleted until planting
+    # showed it. `mark_running` is what puts a job in the one state where the
+    # two guards differ.
+    assert store.mark_running("q-1", "runner-1") is True
+    assert store.job("q-1")["state"] == RUNNING
+    assert store.job("q-1")["runner_id"] == "runner-1"
+
+    assert store.mark_not_dispatched("q-1", "should not apply") is False
+    assert store.job("q-1")["state"] == RUNNING
+
+
+def test_an_unknown_id_changes_nothing_and_says_so(store: JobStore) -> None:
+    assert store.mark_not_dispatched("no-such-job", "why") is False
+
+
+def test_it_frees_the_slot_the_job_was_holding(store: JobStore, make_job) -> None:
+    """A never-started run must not occupy a cap forever.
+
+    `not_dispatched` is terminal and therefore outside ACTIVE_STATES — so the
+    next command for the same (product, server) is accepted rather than refused
+    by a cap held by a run that will never happen.
+    """
+    caps = Caps(max_active_per_job=1)
+    assert store.record_dispatch(make_job("gh-1"), mode="gh-action",
+                                 caps=caps) is EnqueueResult.ACCEPTED
+    # While it is live, the cap holds.
+    assert store.record_dispatch(make_job("gh-2"), mode="gh-action",
+                                 caps=caps) is EnqueueResult.JOB_AT_CAPACITY
+
+    store.mark_not_dispatched("gh-1", "GitHub refused the run.")
+
+    assert store.record_dispatch(make_job("gh-3"), mode="gh-action",
+                                 caps=caps) is EnqueueResult.ACCEPTED
+
+
+def test_the_reason_is_capped_like_every_other_stored_text(
+    store: JobStore, make_job
+) -> None:
+    store.record_dispatch(make_job("gh-1"), mode="gh-action")
+    store.mark_not_dispatched("gh-1", "x" * (MAX_SUMMARY * 3))
+    assert len(store.job("gh-1")["summary"]) <= MAX_SUMMARY

@@ -21,7 +21,8 @@ from urllib.parse import unquote, urlparse
 
 from .base import (
     ABANDONED, ACTIVE_STATES, BUSY_STATES, CLAIMED, DONE, FAILED, MAX_FIELD,
-    MAX_SUMMARY, NO_CAPS, QUEUED, RUNNING, ActionKind, Caps, EnqueueResult, Job,
+    MAX_SUMMARY, NOT_DISPATCHED, NO_CAPS, QUEUED, RUNNING, ActionKind, Caps,
+    EnqueueResult, Job,
     JobDef, JobStore, SaveResult, StoreBusy, StoreError, StoreUnavailable,
     near_misses, validate_job_def,
 )
@@ -99,7 +100,7 @@ def open_store(dsn: str, *, busy_timeout: float = 5.0,
 
 
 __all__ = [
-    "ABANDONED", "ACTIVE_STATES", "ActionKind", "BUSY_STATES", "CLAIMED", "Caps",
+    "ABANDONED", "ACTIVE_STATES", "NOT_DISPATCHED", "ActionKind", "BUSY_STATES", "CLAIMED", "Caps",
     "DONE", "EnqueueResult", "FAILED", "Job", "JobDef", "JobStore", "MAX_FIELD",
     "MAX_SUMMARY", "NO_CAPS", "POSTGRES_SCHEMES", "QUEUED", "RUNNING",
     "SaveResult", "StoreBusy", "StoreError", "StoreUnavailable", "backend_for",
