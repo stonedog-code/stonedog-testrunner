@@ -17,7 +17,7 @@ import pytest
 
 from slack_runtests.store import (
     ABANDONED, CLAIMED, DONE, FAILED, NO_CAPS, QUEUED, RUNNING, Caps,
-    EnqueueResult, JobStore, StoreError,
+    EnqueueResult, JobStore, SaveResult, StoreError,
 )
 
 pytestmark = pytest.mark.unit
@@ -517,3 +517,207 @@ def test_last_for_a_product_is_the_most_recent_one(store: JobStore, make_job) ->
 
     assert store.last_for("webapp")["id"] == "new"
     assert store.last_for("nothing-like-this") is None
+
+
+# ── job definitions (A2.2) ───────────────────────────────────────────────────
+#
+# A `Job` above is a RUN. A `JobDef` here is a DEFINITION that produces runs.
+# The PRD calls both "job", which is why the tables are `jobs` and `job_defs`
+# rather than two names a hurried reader would skim past.
+
+
+def test_a_definition_round_trips_through_both_backends(
+    store: JobStore, make_job_def
+) -> None:
+    """The positive control. Without it every refusal below is trivially true
+    of a store that refuses to save anything at all."""
+    assert store.save_job_def(make_job_def()) is SaveResult.CREATED
+
+    got = store.job_def("jd-1")
+    assert got is not None
+    assert got.name == "alpha smoke"
+    assert got.trigger == ("alpha", "smoke", "sandbox")
+    assert got.action_kind == "gh-action"
+    assert got.action_target == "alpha_smoke.yml"
+
+
+def test_saving_the_same_id_again_updates_rather_than_duplicating(
+    store: JobStore, make_job_def
+) -> None:
+    assert store.save_job_def(make_job_def()) is SaveResult.CREATED
+    assert store.save_job_def(make_job_def(name="renamed")) is SaveResult.UPDATED
+    assert store.count_job_defs() == 1
+    assert store.job_def("jd-1").name == "renamed"
+
+
+def test_created_at_survives_an_update(store: JobStore, make_job_def) -> None:
+    """`updated_at` moves; `created_at` does not.
+
+    An update that reset `created_at` would make "when was this job added"
+    unanswerable, and the History surface is meant to answer exactly that.
+    """
+    store.save_job_def(make_job_def(), now=1000.0)
+    store.save_job_def(make_job_def(name="renamed"), now=2000.0)
+    got = store.job_def("jd-1")
+    assert (got.created_at, got.updated_at) == (1000.0, 2000.0)
+
+
+def test_two_definitions_cannot_claim_the_same_trigger(
+    store: JobStore, make_job_def
+) -> None:
+    """A2.2.2: refused AT SAVE, not resolved at match time.
+
+    Resolved at match time it becomes "whichever row the database returned
+    first", which is a different job running on different days from the same
+    command.
+    """
+    assert store.save_job_def(make_job_def(job_def_id="jd-1")) is SaveResult.CREATED
+    assert store.save_job_def(
+        make_job_def(job_def_id="jd-2", name="a different name")
+    ) is SaveResult.DUPLICATE_TRIGGER
+    # And the refusal left nothing behind.
+    assert store.count_job_defs() == 1
+    assert store.job_def("jd-2") is None
+
+
+def test_a_definition_may_move_to_a_trigger_it_previously_shared(
+    store: JobStore, make_job_def
+) -> None:
+    """Editing the OWNER of a trigger is not a duplicate.
+
+    Without this, a job could never be renamed or re-pointed: the ON CONFLICT
+    (id) path would collide with its own row and report a duplicate trigger,
+    which reads as "somebody else has this" about yourself.
+    """
+    store.save_job_def(make_job_def())
+    assert store.save_job_def(
+        make_job_def(action_target="alpha_smoke_v2.yml")
+    ) is SaveResult.UPDATED
+    assert store.job_def("jd-1").action_target == "alpha_smoke_v2.yml"
+
+
+def test_concurrent_saves_of_one_trigger_leave_exactly_one_row(
+    store: JobStore, make_job_def
+) -> None:
+    """The reason the refusal is a UNIQUE CONSTRAINT and not a prior SELECT.
+
+    Twelve threads, each saving a DIFFERENT id with the SAME trigger. A
+    read-then-write check passes in all twelve before any of them inserts, so
+    the table ends up with several rows claiming one trigger — the exact state
+    A2.2.2 says must be impossible, discovered later at match time.
+
+    The barrier is load-bearing: without it the threads start far enough apart
+    that nothing overlaps, and this test passes against the very defect it
+    exists to catch. That already happened once in this file, to the cap tests.
+    """
+    ready = threading.Barrier(12, timeout=30)
+    results: list[SaveResult] = []
+    errors: list[str] = []
+    lock = threading.Lock()
+
+    def save(n: int) -> None:
+        ready.wait()
+        try:
+            outcome = store.save_job_def(make_job_def(job_def_id=f"jd-{n}",
+                                                      name=f"racer {n}"))
+        except Exception as exc:  # noqa: BLE001 - the point is that there are none
+            with lock:
+                errors.append(f"{type(exc).__name__}: {exc}")
+            return
+        with lock:
+            results.append(outcome)
+
+    threads = [threading.Thread(target=save, args=(n,)) for n in range(12)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+
+    assert not errors, f"a concurrent save raised: {errors}"
+    # THE COUNTS, both of them. "one created" alone is satisfied by a run where
+    # eleven threads crashed, and "eleven refused" alone by a run where the
+    # twelfth did too.
+    assert len(results) == 12, f"only {len(results)} of 12 threads reported"
+    created = [r for r in results if r is SaveResult.CREATED]
+    assert len(created) == 1, f"{len(created)} threads created a row, expected 1"
+    assert all(r is SaveResult.DUPLICATE_TRIGGER
+               for r in results if r not in created), results
+    assert store.count_job_defs() == 1
+
+
+def test_a_trigger_matches_the_whole_tuple_and_nothing_less(
+    store: JobStore, make_job_def
+) -> None:
+    """Exact, never partial. A definition matching two of three tokens is a
+    DIFFERENT job, and returning it runs something nobody asked for."""
+    store.save_job_def(make_job_def())
+
+    assert store.job_def_for("alpha", "smoke", "sandbox").id == "jd-1"
+    for wrong in (
+        ("beta", "smoke", "sandbox"),
+        ("alpha", "full", "sandbox"),
+        ("alpha", "smoke", "staging"),
+    ):
+        assert store.job_def_for(*wrong) is None, wrong
+
+
+def test_definitions_are_listed_in_a_stable_order(
+    store: JobStore, make_job_def
+) -> None:
+    """Two listings of one store must agree, or the tab reorders on refresh."""
+    store.save_job_def(make_job_def(job_def_id="c", name="charlie", product="gamma"))
+    store.save_job_def(make_job_def(job_def_id="a", name="alfa", product="alpha"))
+    store.save_job_def(make_job_def(job_def_id="b", name="bravo", product="beta"))
+    assert [d.name for d in store.job_defs()] == ["alfa", "bravo", "charlie"]
+
+
+def test_deleting_says_whether_anything_was_deleted(
+    store: JobStore, make_job_def
+) -> None:
+    """"Deleted" over an id that never existed is a lie that reads as success."""
+    store.save_job_def(make_job_def())
+    assert store.delete_job_def("jd-1") is True
+    assert store.delete_job_def("jd-1") is False
+    assert store.count_job_defs() == 0
+
+
+def test_a_deleted_trigger_is_free_again(store: JobStore, make_job_def) -> None:
+    """Otherwise a deleted job blocks its own replacement forever."""
+    store.save_job_def(make_job_def())
+    store.delete_job_def("jd-1")
+    assert store.save_job_def(
+        make_job_def(job_def_id="jd-2", name="the replacement")
+    ) is SaveResult.CREATED
+
+
+def test_an_empty_store_reports_zero_rather_than_looking_the_same_as_a_full_one(
+    store: JobStore,
+) -> None:
+    assert store.count_job_defs() == 0
+    assert store.job_defs() == []
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("job_def_id", ""),
+        ("name", "   "),
+        ("product", ""),
+        ("test_scope", ""),
+        ("server", ""),
+        ("action_kind", "curl"),
+        ("action_target", ""),
+    ],
+)
+def test_a_malformed_definition_is_refused_by_both_backends(
+    store: JobStore, make_job_def, field: str, value: str
+) -> None:
+    """Shape only — whether `product` is ALLOWED is checked at execution (A2.3).
+
+    Both backends refuse identically because `validate_job_def` is called by
+    each backend's own `save_job_def` rather than by the caller, so there is no
+    path into the table that skips it.
+    """
+    with pytest.raises(StoreError):
+        store.save_job_def(make_job_def(**{field: value}))
+    assert store.count_job_defs() == 0

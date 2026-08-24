@@ -503,6 +503,16 @@ Checked, not assumed:
 - **Non-vacuity, V1/V2:** three vulnerabilities were planted — always-true
   signature, removed replay window, unrestricted product — and each was caught
   by the suite; green again after restore.
+- **Non-vacuity, job definitions (NEH-1141):** six plants across both backends,
+  each restored — the unique trigger constraint dropped (Postgres, then SQLite,
+  caught by the sequential *and* the 12-thread concurrent case); exact tuple
+  matching relaxed to partial; shape validation skipped; and `created_at` reset
+  on update. **The first attempt at that last one was a no-op**, and finding out
+  why was worth more than the plant: `created_at` is preserved by *omitting* it
+  from `ON CONFLICT DO UPDATE SET`, not by the value computed for the INSERT —
+  so a `SELECT created_at` that looked like the mechanism was reading a column
+  nothing used. It was removed, and the plant redone as adding
+  `created_at = EXCLUDED.created_at`, which both backends then caught.
 - **Non-vacuity, the trigger allowlists (NEH-1139):** four plants, each
   restored — the startup gate no longer requiring them; `parse` treating an
   empty allowlist as "allow everything"; the test server skipping its
@@ -520,6 +530,26 @@ Checked, not assumed:
   an allowlist a boundary rather than a formality; with all six settings present
   it starts and reports `2 product(s) · 1 server(s) · 2 test scope(s)` — the
   counts, because `allowlists loaded` says the same thing over three empty sets.
+- **Tier sizes depend on whether a Postgres DSN is set, and the numbers are
+  worth knowing before quoting one.** `TESTRUNNER_TEST_POSTGRES_DSN` adds the
+  second backend to the conformance tier — and, because that file is marked
+  `unit`, to the unit tier as well:
+
+  | | DSN unset | DSN set |
+  |---|---|---|
+  | `run.sh test` | 268 | 319 |
+  | `run.sh test:conformance` | 53 | 104 |
+
+  **CI sets the DSN on the conformance STEP only**, not for the whole job, so a
+  CI run reports **268 and 104** — not 319. Worth stating because the obvious
+  reading of the table is that the right-hand column is "what CI does", and it
+  is not; that column is what a laptop does with the variable exported. This
+  entry said exactly that until the CI log was read.
+
+  So "conformance passed locally" is **half the tier**, and the Postgres half —
+  the one the edge actually runs in production — is the half a laptop skips. A
+  throwaway container closes that gap locally:
+  `docker run -d --rm -e POSTGRES_PASSWORD=… -p 55433:5432 postgres:16-alpine`.
 - **Non-vacuity, integration tier:** three more were planted, one per test —
   always-true signature (caught by the invalid-origin test), `../../etc` and
   `prod` added to the allowlists (caught by the invalid-structure test), and a

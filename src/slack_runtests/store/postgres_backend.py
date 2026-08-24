@@ -58,6 +58,7 @@ from typing import Any, Iterable, Iterator
 from .base import (
     ABANDONED, ACTIVE_STATES, BUSY_STATES, CLAIMED, DONE, FAILED, MAX_SUMMARY,
     NO_CAPS, QUEUED, RUNNING, Caps, EnqueueResult, Job, JobStore, StoreBusy,
+    JobDef, SaveResult, validate_job_def,
     StoreUnavailable, now_or, runner_view, validate_job, validate_runner,
 )
 
@@ -97,6 +98,35 @@ CREATE TABLE IF NOT EXISTS jobs (
 CREATE INDEX IF NOT EXISTS jobs_state_created ON jobs (state, created_at);
 CREATE INDEX IF NOT EXISTS jobs_state_product_server ON jobs (state, product, server);
 CREATE INDEX IF NOT EXISTS jobs_state_channel ON jobs (state, slack_channel);
+
+-- Job DEFINITIONS (A2.2). Not the queue above: `jobs` is one row per RUN,
+-- this is one row per saved name/trigger/action.
+--
+-- THE UNIQUE CONSTRAINT IS THE WHOLE POINT OF THE TABLE. A2.2.2 requires two
+-- definitions claiming one trigger to be refused AT SAVE rather than resolved
+-- at match time. A read-then-write check cannot do that under concurrency --
+-- both transactions pass the SELECT and both INSERT -- so `save_job_def`
+-- catches the violation rather than predicting it.
+--
+-- TEXT, not VARCHAR(n), for the reason stated in base.py: SQLite ignores a
+-- length limit and Postgres enforces it, so the same over-long value is stored
+-- on one backend and rejected on the other. `validate_job_def` is the single
+-- rule, in application code, serving both.
+CREATE TABLE IF NOT EXISTS job_defs (
+    id            TEXT PRIMARY KEY,
+    name          TEXT NOT NULL,
+    description   TEXT NOT NULL DEFAULT '',
+    product       TEXT NOT NULL,
+    test_scope    TEXT NOT NULL,
+    server        TEXT NOT NULL,
+    action_kind   TEXT NOT NULL,
+    action_target TEXT NOT NULL,
+    created_at    DOUBLE PRECISION NOT NULL,
+    updated_at    DOUBLE PRECISION NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS job_defs_trigger
+    ON job_defs (product, test_scope, server);
 """
 
 #: Kept in step with the SQLite backend's migration list by the conformance
@@ -463,6 +493,100 @@ class PostgresStore(JobStore):
         with self._cursor() as cur:
             cur.execute("SELECT state, COUNT(*) n FROM jobs GROUP BY state")
             return {r["state"]: r["n"] for r in cur.fetchall()}
+
+    # ── job definitions (A2.2) ───────────────────────────────────────────────
+
+    def save_job_def(self, job_def: JobDef, *, now: float | None = None) -> SaveResult:
+        validate_job_def(job_def)
+        stamp = now_or(now)
+        with self._txn() as cur:
+            # `created_at` is preserved by OMITTING it from the DO UPDATE
+            # SET, not by reading the old value and writing it back. The
+            # SELECT below therefore answers one question only -- CREATED or
+            # UPDATED -- and an earlier version of this read `created_at` from
+            # it too, which looked like the mechanism and was discarded on
+            # every conflict. Found by planting: setting `created = stamp`
+            # changed nothing, because nothing ever used it on the update path.
+            cur.execute("SELECT 1 FROM job_defs WHERE id = %s", (job_def.id,))
+            existing = cur.fetchone()
+            try:
+                cur.execute(
+                    """INSERT INTO job_defs
+                       (id, name, description, product, test_scope, server,
+                        action_kind, action_target, created_at, updated_at)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                       ON CONFLICT (id) DO UPDATE SET
+                         name = EXCLUDED.name,
+                         description = EXCLUDED.description,
+                         product = EXCLUDED.product,
+                         test_scope = EXCLUDED.test_scope,
+                         server = EXCLUDED.server,
+                         action_kind = EXCLUDED.action_kind,
+                         action_target = EXCLUDED.action_target,
+                         updated_at = EXCLUDED.updated_at""",
+                    (job_def.id, job_def.name, job_def.description, job_def.product,
+                     job_def.test_scope, job_def.server, job_def.action_kind,
+                     job_def.action_target, stamp, stamp),
+                )
+            except Exception as exc:  # noqa: BLE001 - narrowed by SQLSTATE below
+                # Keyed on SQLSTATE 23505 (unique_violation) rather than on
+                # psycopg's exception class, because psycopg is an optional
+                # extra here and every import of it in this module is lazy --
+                # a module-level `from psycopg.errors import UniqueViolation`
+                # would make the SQLite-only install fail to import.
+                #
+                # Anything else is re-raised unchanged. A bare `except` that
+                # swallowed a connection error would report DUPLICATE_TRIGGER
+                # for a database that is down, which is a wrong answer rather
+                # than an absent one.
+                if getattr(exc, "sqlstate", None) != "23505":
+                    raise
+                # The trigger index fired: another id already claims this exact
+                # tuple. A conflict on `id` cannot reach here, since ON CONFLICT
+                # (id) absorbs it.
+                #
+                # POSTGRES ABORTS THE WHOLE TRANSACTION on an integrity error,
+                # unlike SQLite, so nothing further may run on this cursor. The
+                # `with` block rolls back on the way out, which is exactly what
+                # is wanted -- returning from inside it is safe precisely
+                # because there is nothing left to commit.
+                return SaveResult.DUPLICATE_TRIGGER
+        return SaveResult.UPDATED if existing else SaveResult.CREATED
+
+    def job_def(self, job_def_id: str) -> JobDef | None:
+        with self._cursor() as cur:
+            cur.execute("SELECT * FROM job_defs WHERE id = %s", (job_def_id,))
+            row = cur.fetchone()
+        return _job_def_from_row(row) if row else None
+
+    def job_def_for(self, product: str, test_scope: str, server: str) -> JobDef | None:
+        with self._cursor() as cur:
+            cur.execute(
+                """SELECT * FROM job_defs
+                   WHERE product = %s AND test_scope = %s AND server = %s""",
+                (product, test_scope, server),
+            )
+            row = cur.fetchone()
+        return _job_def_from_row(row) if row else None
+
+    def job_defs(self) -> list[JobDef]:
+        with self._cursor() as cur:
+            cur.execute("SELECT * FROM job_defs ORDER BY name, id")
+            return [_job_def_from_row(r) for r in cur.fetchall()]
+
+    def delete_job_def(self, job_def_id: str) -> bool:
+        with self._txn() as cur:
+            cur.execute("DELETE FROM job_defs WHERE id = %s", (job_def_id,))
+            return cur.rowcount > 0
+
+
+def _job_def_from_row(row: Any) -> JobDef:
+    return JobDef(
+        id=row["id"], name=row["name"], description=row["description"],
+        product=row["product"], test_scope=row["test_scope"], server=row["server"],
+        action_kind=row["action_kind"], action_target=row["action_target"],
+        created_at=row["created_at"], updated_at=row["updated_at"],
+    )
 
 
 def _advisory_lock(cur: Any, key: int) -> None:

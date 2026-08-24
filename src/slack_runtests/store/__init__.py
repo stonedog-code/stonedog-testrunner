@@ -21,8 +21,9 @@ from urllib.parse import unquote, urlparse
 
 from .base import (
     ABANDONED, ACTIVE_STATES, BUSY_STATES, CLAIMED, DONE, FAILED, MAX_FIELD,
-    MAX_SUMMARY, NO_CAPS, QUEUED, RUNNING, Caps, EnqueueResult, Job, JobStore,
-    StoreBusy, StoreError, StoreUnavailable,
+    MAX_SUMMARY, NO_CAPS, QUEUED, RUNNING, ActionKind, Caps, EnqueueResult, Job,
+    JobDef, JobStore, SaveResult, StoreBusy, StoreError, StoreUnavailable,
+    near_misses, validate_job_def,
 )
 
 #: The schemes that mean Postgres. `postgres://` is the one everybody types and
@@ -98,8 +99,9 @@ def open_store(dsn: str, *, busy_timeout: float = 5.0,
 
 
 __all__ = [
-    "ABANDONED", "ACTIVE_STATES", "BUSY_STATES", "CLAIMED", "Caps", "DONE",
-    "EnqueueResult", "FAILED", "Job", "JobStore", "MAX_FIELD", "MAX_SUMMARY",
-    "NO_CAPS", "POSTGRES_SCHEMES", "QUEUED", "RUNNING", "StoreBusy",
-    "StoreError", "StoreUnavailable", "backend_for", "open_store", "sqlite_path",
+    "ABANDONED", "ACTIVE_STATES", "ActionKind", "BUSY_STATES", "CLAIMED", "Caps",
+    "DONE", "EnqueueResult", "FAILED", "Job", "JobDef", "JobStore", "MAX_FIELD",
+    "MAX_SUMMARY", "NO_CAPS", "POSTGRES_SCHEMES", "QUEUED", "RUNNING",
+    "SaveResult", "StoreBusy", "StoreError", "StoreUnavailable", "backend_for",
+    "near_misses", "open_store", "sqlite_path", "validate_job_def",
 ]

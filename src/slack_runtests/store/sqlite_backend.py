@@ -31,6 +31,9 @@ from pathlib import Path
 from typing import Any, Iterable, Iterator
 
 from .base import (
+    JobDef,
+    SaveResult,
+    validate_job_def,
     ABANDONED, ACTIVE_STATES, BUSY_STATES, CLAIMED, DONE, FAILED, MAX_SUMMARY,
     NO_CAPS, QUEUED, RUNNING, Caps, EnqueueResult, Job, JobStore, StoreBusy,
     now_or, runner_view, validate_job, validate_runner,
@@ -74,6 +77,32 @@ CREATE INDEX IF NOT EXISTS jobs_state_created ON jobs (state, created_at);
 -- the whole history, and the history is the one table that only grows.
 CREATE INDEX IF NOT EXISTS jobs_state_product_server ON jobs (state, product, server);
 CREATE INDEX IF NOT EXISTS jobs_state_channel ON jobs (state, slack_channel);
+
+-- Job DEFINITIONS (A2.2). Not the queue above: `jobs` is one row per RUN,
+-- this is one row per saved name/trigger/action.
+--
+-- THE UNIQUE INDEX IS THE WHOLE POINT OF THE TABLE.
+-- A2.2.2 requires two definitions claiming one trigger to be refused AT SAVE
+-- rather than resolved at match time by whichever row came back first. A
+-- read-then-write check in Python cannot do that: two concurrent saves both
+-- pass the SELECT and both INSERT. The constraint is the only thing that
+-- serialises them, so `save_job_def` catches its violation rather than trying
+-- to predict it.
+CREATE TABLE IF NOT EXISTS job_defs (
+    id            TEXT PRIMARY KEY,
+    name          TEXT NOT NULL,
+    description   TEXT NOT NULL DEFAULT '',
+    product       TEXT NOT NULL,
+    test_scope    TEXT NOT NULL,
+    server        TEXT NOT NULL,
+    action_kind   TEXT NOT NULL,
+    action_target TEXT NOT NULL,
+    created_at    REAL NOT NULL,
+    updated_at    REAL NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS job_defs_trigger
+    ON job_defs (product, test_scope, server);
 """
 
 #: The migration for a database written before `dispatch_mode` existed. Adding
@@ -453,6 +482,89 @@ class SqliteStore(JobStore):
         with self._conn() as conn:
             rows = conn.execute("SELECT state, COUNT(*) n FROM jobs GROUP BY state").fetchall()
         return {r["state"]: r["n"] for r in rows}
+
+    # ── job definitions (A2.2) ───────────────────────────────────────────────
+
+    def save_job_def(self, job_def: JobDef, *, now: float | None = None) -> SaveResult:
+        validate_job_def(job_def)
+        stamp = now_or(now)
+        with self._txn() as conn:
+            # `created_at` is preserved by OMITTING it from the DO UPDATE
+            # SET, not by reading the old value and writing it back. The
+            # SELECT below therefore answers one question only -- CREATED or
+            # UPDATED -- and an earlier version of this read `created_at` from
+            # it too, which looked like the mechanism and was discarded on
+            # every conflict. Found by planting: setting `created = stamp`
+            # changed nothing, because nothing ever used it on the update path.
+            existing = conn.execute(
+                "SELECT 1 FROM job_defs WHERE id = ?", (job_def.id,)
+            ).fetchone()
+            try:
+                conn.execute(
+                    """INSERT INTO job_defs
+                       (id, name, description, product, test_scope, server,
+                        action_kind, action_target, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                       ON CONFLICT(id) DO UPDATE SET
+                         name = excluded.name,
+                         description = excluded.description,
+                         product = excluded.product,
+                         test_scope = excluded.test_scope,
+                         server = excluded.server,
+                         action_kind = excluded.action_kind,
+                         action_target = excluded.action_target,
+                         updated_at = excluded.updated_at""",
+                    (job_def.id, job_def.name, job_def.description, job_def.product,
+                     job_def.test_scope, job_def.server, job_def.action_kind,
+                     job_def.action_target, stamp, stamp),
+                )
+            except sqlite3.IntegrityError as exc:
+                # The UNIQUE index on (product, test_scope, server) fired, so
+                # some OTHER id already claims this trigger. Caught rather than
+                # predicted with a prior SELECT: two concurrent saves both pass
+                # a read-then-write check and both insert (A2.2.2).
+                #
+                # A conflict on `id` cannot reach here -- ON CONFLICT(id)
+                # handles it -- so the only violation left is the trigger.
+                if "job_defs" not in str(exc) and "unique" not in str(exc).lower():
+                    raise
+                return SaveResult.DUPLICATE_TRIGGER
+        return SaveResult.UPDATED if existing else SaveResult.CREATED
+
+    def job_def(self, job_def_id: str) -> JobDef | None:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM job_defs WHERE id = ?", (job_def_id,)
+            ).fetchone()
+        return _job_def_from_row(row) if row else None
+
+    def job_def_for(self, product: str, test_scope: str, server: str) -> JobDef | None:
+        with self._conn() as conn:
+            row = conn.execute(
+                """SELECT * FROM job_defs
+                   WHERE product = ? AND test_scope = ? AND server = ?""",
+                (product, test_scope, server),
+            ).fetchone()
+        return _job_def_from_row(row) if row else None
+
+    def job_defs(self) -> list[JobDef]:
+        with self._conn() as conn:
+            rows = conn.execute("SELECT * FROM job_defs ORDER BY name, id").fetchall()
+        return [_job_def_from_row(r) for r in rows]
+
+    def delete_job_def(self, job_def_id: str) -> bool:
+        with self._txn() as conn:
+            cur = conn.execute("DELETE FROM job_defs WHERE id = ?", (job_def_id,))
+        return cur.rowcount > 0
+
+
+def _job_def_from_row(row: sqlite3.Row) -> JobDef:
+    return JobDef(
+        id=row["id"], name=row["name"], description=row["description"],
+        product=row["product"], test_scope=row["test_scope"], server=row["server"],
+        action_kind=row["action_kind"], action_target=row["action_target"],
+        created_at=row["created_at"], updated_at=row["updated_at"],
+    )
 
 
 def _busy(exc: sqlite3.OperationalError) -> StoreBusy:
