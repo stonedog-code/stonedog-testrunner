@@ -11,6 +11,10 @@ on:
       correlation_id: { required: true,  type: string }
       product:        { required: true,  type: string }
       server:         { required: true,  type: string }
+      # NEH-1152: the third trigger token. Every input the edge sends must be
+      # declared here, or workflow_dispatch answers 422 -- which reads as a
+      # GitHub problem rather than a workflow that is one line out of date.
+      test_scope:     { required: false, type: string }
       select:         { required: false, type: string }
       marker:         { required: false, type: string }
       slack_channel:  { required: true,  type: string }
@@ -55,6 +59,7 @@ jobs:
       CORRELATION_ID: ${{ inputs.correlation_id }}
       SLACK_CHANNEL: ${{ inputs.slack_channel }}
       SLACK_USER: ${{ inputs.slack_user }}
+      TEST_SCOPE: ${{ inputs.test_scope }}
       SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
 
     steps:

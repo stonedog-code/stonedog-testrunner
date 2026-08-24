@@ -503,6 +503,20 @@ Checked, not assumed:
 - **Non-vacuity, V1/V2:** three vulnerabilities were planted — always-true
   signature, removed replay window, unrestricted product — and each was caught
   by the suite; green again after restore.
+- **Non-vacuity, the gh-action path (NEH-1152):** five plants, each restored —
+  the workflow-name guard removed (path traversal into another repository with
+  our token); a command with no matching job queued anyway; the refusal no
+  longer naming what would have matched; GitHub's error body echoed to the
+  channel; and an input sent that the workflow does not declare, which 422s
+  every run.
+- **The bug REVIEW found, and the test written for it.** The first version of
+  the `gh-action` branch returned *before* reaching the store, so nothing
+  refused a repeat — and Slack retries anything it has not heard back from in
+  three seconds. One command could run the suite **twice**. The fix records the
+  dispatch first, so `trigger_id`'s primary key refuses the retry, and the
+  dispatch moved into a background task so the reply is always inside the
+  budget. Planted by making the branch skip the record: the regression test
+  catches it.
 - **Non-vacuity, job definitions (NEH-1141):** six plants across both backends,
   each restored — the unique trigger constraint dropped (Postgres, then SQLite,
   caught by the sequential *and* the 12-thread concurrent case); exact tuple

@@ -37,6 +37,7 @@ import urllib.request
 from pathlib import Path
 
 import pytest
+from slack_runtests.store import JobDef, open_store
 from harness import (
     TEST_CHANNEL_ID,
     TEST_PRODUCTS,
@@ -49,6 +50,23 @@ from harness import (
 )
 
 READY_TIMEOUT = 25.0
+
+#: The one (product, server) pair the fixture deliberately does NOT define a job
+#: for. Both tokens are on the allowlist, so a command naming them passes the
+#: grammar and fails resolution -- which is the only way to reach the no-match
+#: refusal and its suggestion.
+UNSEEDED_PRODUCT = "catalog"
+UNSEEDED_SERVER = "local"
+
+#: The one job whose action is `gh-action` rather than `test-server`. Its
+#: (product, server) must collide with NOTHING -- a trigger is unique, and it
+#: must not take the unseeded pair either, or the no-match case disappears.
+#: So the loop skips two pairs and this claims the second.
+#: TWO of them, one per test, because RUNTESTS_MAX_ACTIVE_PER_JOB is 1 per
+#: (product, server): a test that dispatches leaves that pair "running", so a
+#: second test sharing it is refused by the CAP and never reaches the behaviour
+#: it meant to check. Found exactly that way.
+GH_PAIRS = (("billing", "local"), ("webapp", "local"))
 
 
 def _free_port() -> int:
@@ -119,6 +137,19 @@ def edge(tmp_path_factory: pytest.TempPathFactory):
         "SLACK_TEAM_ID": TEST_TEAM_ID,
         "RUNTESTS_CHANNELS": TEST_CHANNEL_ID,
         "RUNTESTS_USERS": TEST_USER_ID,
+        # The per-channel RUNNING cap is raised for this tier only.
+        #
+        # It defaults to 3, and these tests share one allowlisted channel and one
+        # session-scoped edge — so dispatched runs accumulate and later door
+        # tests get refused by the cap before reaching the behaviour they are
+        # about. That is the cap working correctly on a fixture that never
+        # finishes its jobs.
+        #
+        # Safe to raise HERE because the caps have their own coverage in the
+        # conformance tier, where they are asserted against both backends with a
+        # barrier so the threads genuinely race. This tier is about the doors.
+        "RUNTESTS_MAX_RUNNING_PER_CHANNEL": "100",
+        "RUNTESTS_MAX_QUEUED_PER_CHANNEL": "100",
         "RUNTESTS_PRODUCTS": TEST_PRODUCTS,
         "RUNTESTS_SERVERS": TEST_SERVERS,
         "RUNTESTS_TEST_SCOPES": TEST_TEST_SCOPES,
@@ -157,6 +188,53 @@ def edge(tmp_path_factory: pytest.TempPathFactory):
 
     try:
         _wait_ready(url, process, time.monotonic() + READY_TIMEOUT)
+
+        # A command must MATCH A JOB DEFINITION to run anything (A2.2.2), so
+        # these tests seed one. Written after the edge is up, on purpose: the
+        # edge creates the schema at startup, and seeding first would race it.
+        #
+        # `test-server` rather than `gh-action`, because this tier is about the
+        # QUEUE and the runner door. The gh-action path dispatches to GitHub and
+        # is covered by unit tests with the HTTP call faked -- an integration
+        # test of it would either hit the real API or prove nothing.
+        # The CROSS PRODUCT of the allowlists, because a trigger is the whole
+        # tuple and these tests vary the server. Seeding only one server made
+        # them fail with the near-miss suggestion -- correctly, which is how the
+        # message earned its keep before any test asserted it.
+        seed = open_store(str(workdir / "edge.db"))
+        try:
+            for product in TEST_PRODUCTS.split(","):
+                for server in TEST_SERVERS.split(","):
+                    for scope in TEST_TEST_SCOPES.split(","):
+                        # ONE DELIBERATE HOLE. Seeding every combination leaves
+                        # the no-match path unreachable, so the refusal and its
+                        # near-miss suggestion would never be exercised -- a
+                        # green suite over a branch no test can enter.
+                        #
+                        # (catalog, local) is allowlisted and undefined, so a
+                        # command naming it is refused by RESOLUTION rather than
+                        # by the grammar, which is the distinction being tested.
+                        if (product, server) == (UNSEEDED_PRODUCT, UNSEEDED_SERVER) \
+                                or (product, server) in GH_PAIRS:
+                            continue
+                        seed.save_job_def(JobDef(
+                            id=f"jd-{product}-{server}-{scope}",
+                            name=f"{product} {scope} on {server}",
+                            product=product, test_scope=scope, server=server,
+                            action_kind="test-server", action_target="any",
+                        ))
+            # ONE gh-action job, so the dispatch path is reachable. With no
+            # GITHUB_TOKEN set the dispatch is a dry run that makes no HTTP
+            # request, which is what makes this safe to exercise in a test.
+            for n, (product, server) in enumerate(GH_PAIRS, start=1):
+                seed.save_job_def(JobDef(
+                    id=f"jd-gh-{n}", name=f"gh dispatch {n}",
+                    product=product, test_scope="smoke", server=server,
+                    action_kind="gh-action", action_target="runtests.yml",
+                ))
+        finally:
+            seed.close()
+
         yield EdgeUnderTest(
             url=url,
             signing_secret=TEST_SIGNING_SECRET,

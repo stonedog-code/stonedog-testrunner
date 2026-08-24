@@ -35,13 +35,16 @@ import uuid
 
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request
+from fastapi import BackgroundTasks, FastAPI, Request
 from fastapi.responses import JSONResponse, Response
 
 from slack_runtests import gate, identity
 from slack_runtests.authz import refuse_or_warn
 from stonedog_logs import configure as configure_logging
-from slack_runtests.store import EnqueueResult, Job, JobStore, StoreBusy, open_store
+from slack_runtests.runners.github import dispatch_workflow
+from slack_runtests.store import (
+    ActionKind, EnqueueResult, Job, JobStore, StoreBusy, near_misses, open_store,
+)
 
 from . import auth
 from .config import EdgeConfig, load
@@ -247,7 +250,7 @@ async def edge_identity(request: Request) -> dict[str, str]:
 # ── door 1: Slack ────────────────────────────────────────────────────────────
 
 @app.post("/slack/commands")
-async def slack_commands(request: Request) -> JSONResponse:
+async def slack_commands(request: Request, background: BackgroundTasks) -> JSONResponse:
     """Validate, queue, and answer inside Slack's three-second budget.
 
     Note what is NOT here: no background task, no subprocess, no outbound call
@@ -295,6 +298,102 @@ async def slack_commands(request: Request) -> JSONResponse:
         if not record:
             return ephemeral(f"No recorded run for `{args.product}` yet.")
         return ephemeral(_describe(record))
+
+    # ── resolve the command to a JOB DEFINITION (A2.2.2) ─────────────────────
+    #
+    # The trigger is the full tuple, matched exactly. A definition agreeing on
+    # two of three tokens is a DIFFERENT job, and running it would run something
+    # nobody asked for.
+    job_def = store.job_def_for(args.product, args.test_scope, args.server)
+    if job_def is None:
+        # Refused WITH what would have matched. A2.2.2: silently ignoring a
+        # command reads to the user as the bot being down, and a bare "no such
+        # job" reads as the job having been deleted.
+        defined = store.job_defs()
+        suggestions = near_misses((args.product, args.test_scope, args.server), defined)
+        if not defined:
+            # An empty store and a store with no MATCH need different messages.
+            # "no job matches" over zero definitions sends somebody looking for
+            # a typo in a system that has never been configured.
+            return ephemeral(
+                "No jobs are configured yet, so there is nothing to run. "
+                "Add one in the Test Runner tab."
+            )
+        if suggestions:
+            listed = "\n".join(f"  · `{d.name}` — {d.trigger_text()}" for d in suggestions[:5])
+            return ephemeral(
+                f"No job matches `{args.product}` / `{args.test_scope}` / "
+                f"`{args.server}`. Did you mean:\n{listed}"
+            )
+        return ephemeral(
+            f"No job matches `{args.product}` / `{args.test_scope}` / "
+            f"`{args.server}`, and none is close. "
+            f"{len(defined)} job(s) are configured."
+        )
+
+    # ── execute the definition's ACTION ──────────────────────────────────────
+    #
+    # v1 and v2 differ by this row, not by a deployment: `gh-action` dispatches
+    # a workflow, `test-server` parks the job for an enrolled runner to claim.
+    if job_def.action_kind == ActionKind.GH_ACTION.value:
+        # RECORD BEFORE DISPATCHING. This is the idempotency, and the first
+        # version of this branch did not have it: it returned before reaching
+        # the store, so nothing refused a repeat.
+        #
+        # Slack retries any command it does not hear back from in three seconds,
+        # and the dispatch is an HTTP call to GitHub. Without a record, a slow
+        # GitHub answer means Slack retries, the retry dispatches again, and the
+        # suite runs TWICE from one command -- the exact failure this file's
+        # other comments warn about. `job_id` is derived from `trigger_id`, so
+        # the PRIMARY KEY refuses the second one.
+        try:
+            outcome = store.record_dispatch(
+                Job(
+                    id=job_id, product=args.product, server=args.server,
+                    select_expr=args.select, marker=args.marker,
+                    slack_channel=channel, slack_user=str(form.get("user_id", "")),
+                ),
+                mode=ActionKind.GH_ACTION.value,
+                caps=cfg.caps,
+            )
+        except StoreBusy:
+            log.warning("store busy while recording %s", job_id)
+            return ephemeral(
+                "⚠️ The runner is busy right now — try that again in a moment."
+            )
+        if outcome is not EnqueueResult.ACCEPTED:
+            return ephemeral(_refusal(outcome, job_id, args.product, channel))
+
+        # DISPATCHED IN THE BACKGROUND, so the reply is always inside Slack's
+        # three-second budget however slow GitHub is. Same shape the standalone
+        # server uses.
+        background.add_task(
+            _dispatch_and_log,
+            repo=cfg.repo_for(args.product),
+            workflow=job_def.action_target,
+            ref=cfg.github_ref,
+            token=cfg.github_token,
+            correlation_id=job_id,
+            product=args.product,
+            server=args.server,
+            test_scope=args.test_scope,
+            select=args.select,
+            marker=args.marker,
+            slack_channel=channel,
+            slack_user=str(form.get("user_id", "")),
+        )
+
+        # THE ACK IS ALL THIS PROCESS SAYS.
+        #
+        # The edge holds no Slack bot token, deliberately: it is the
+        # internet-facing component, and a compromised public endpoint must not
+        # be able to post as the bot. Everything after this is reported by the
+        # WORKFLOW, which posts its own run-log link at the start and its own
+        # counts at the end.
+        return ephemeral(
+            f"⏳ Dispatching `{job_def.name}` for `{args.product}` on "
+            f"`{args.server}` (`{job_id}`) — the run will post here."
+        )
 
     job = Job(
         id=job_id,
@@ -380,6 +479,22 @@ def _describe(record: dict) -> str:
 
 
 # ── door 2: test servers ─────────────────────────────────────────────────────
+
+async def _dispatch_and_log(**kwargs) -> None:
+    """Dispatch after the reply has gone, and say loudly if it did not work.
+
+    The user has already been told the run is on its way, so a failure here has
+    no reply to travel back on -- the edge cannot post to Slack. It is logged at
+    WARNING with the correlation id, which is the id the user was given, so the
+    two can be matched. Surfacing it in the tab's History is NEH-1153.
+    """
+    result = await dispatch_workflow(**kwargs)
+    cid = kwargs.get("correlation_id")
+    if result.ok:
+        log.info("gh-action %s dispatched", cid)
+    else:
+        log.warning("gh-action %s NOT dispatched: %s", cid, result.log_detail or result.message)
+
 
 @app.post("/runner/enroll")
 async def enroll(request: Request) -> Response:

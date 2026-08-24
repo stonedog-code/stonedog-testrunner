@@ -56,8 +56,47 @@ else.
 | `RUNTESTS_PRODUCTS` | *(empty)* | **Required.** Comma-separated allowlist of products that may ever be tested. Interpolated into a suite path, so this is what stops `../../etc`. |
 | `RUNTESTS_SERVERS` | *(empty)* | **Required.** Comma-separated allowlist of environments. The boundary that keeps a production host from being nameable in a chat box — so do not put one here. |
 | `RUNTESTS_TEST_SCOPES` | *(empty)* | **Required.** Comma-separated allowlist of test scopes (`smoke`, `full`, …). The third token of a trigger. |
+| `GITHUB_TOKEN` | *(empty)* | Dispatches a `gh-action` job's workflow. Empty makes the dispatch a **dry run** that says what it would have done. |
+| `GITHUB_REPO` | *(empty)* | The repository to dispatch to when a product has no entry in `RUNTESTS_PRODUCT_REPOS`. |
+| `RUNTESTS_PRODUCT_REPOS` | *(empty)* | `product=owner/repo` pairs. **Which repos may be dispatched to is configuration, never a job row** (A2.3) — so adding a job can never widen where this token is pointed. |
+| `GITHUB_REF_NAME` | `main` | The ref the workflow is dispatched on. |
 | `SLACK_DEFAULT_CHANNEL` | `#testing` | Where results go if the payload carries no channel. |
 | `RUNTESTS_INSECURE_DEV` | *(empty)* | Start anyway with all of the above absent. **Local development only.** Warns, on every start, naming each protection it is ignoring. |
+
+### A command must match a job definition
+
+The allowlists say a value **may** be named. A **job definition** says what
+happens when it is. Both are required, and they are different questions:
+
+```
+/testauto -p alpha -s sandbox --test_scope smoke
+             │        │            │
+             └────────┴────────────┴──  the TRIGGER, matched as a whole tuple
+```
+
+A definition matching two of three tokens is a *different job*, so matching is
+exact. A command matching none is refused **with what would have matched** —
+silently ignoring it reads as the bot being down, and a bare "no such job" reads
+as the job having been deleted.
+
+Its **action** decides what runs, and this is the only difference between v1 and
+v2 — a row, not a deployment:
+
+| `action_kind` | what happens |
+|---|---|
+| `gh-action` | dispatches `action_target` (a workflow file) in that product's repo |
+| `test-server` | parks the job for an enrolled test server to claim |
+
+**The edge never posts to Slack**, for either. It answers the slash command with
+an acknowledgement and nothing else. A `gh-action` run reports itself: the
+workflow posts its own run-log link when it starts and its own counts when it
+finishes. That is why the edge holds no bot token — it is the internet-facing
+component, and a compromised public endpoint must not be able to post as the bot.
+
+**The dispatch happens after the reply**, in a background task, because Slack
+retries anything it has not heard back from in three seconds. The dispatch is
+*recorded first*: `job_id` comes from Slack's `trigger_id`, so a retry hits the
+primary key and is refused rather than running the suite twice.
 
 ### Finding the values
 
