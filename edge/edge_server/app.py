@@ -45,6 +45,7 @@ from slack_runtests.authz import refuse_or_warn
 from stonedog_logs import configure as configure_logging
 from slack_runtests.runners.github import dispatch_workflow
 from slack_runtests.store import (
+    NOT_DISPATCHED,
     ActionKind, EnqueueResult, Job, JobDef, JobStore, SaveResult, StoreBusy,
     StoreError, near_misses, open_store,
 )
@@ -372,6 +373,7 @@ async def slack_commands(request: Request, background: BackgroundTasks) -> JSONR
         # server uses.
         background.add_task(
             _dispatch_and_log,
+            store,
             repo=cfg.repo_for(args.product),
             workflow=job_def.action_target,
             ref=cfg.github_ref,
@@ -469,6 +471,17 @@ def _refusal(outcome: EnqueueResult, job_id: str, product: str, channel: str) ->
 
 def _describe(record: dict) -> str:
     state = record["state"]
+
+    # A run that NEVER STARTED is not a run that failed, and the two must not
+    # read alike. Somebody told "failed" goes looking for a broken test; the
+    # truth is that GitHub refused the workflow or could not be reached
+    # (NEH-1156). The stored summary is already written for a user.
+    if state == NOT_DISPATCHED:
+        return (
+            f"`{record['product']}` on `{record['server']}` — id `{record['id']}`, "
+            f"**never started**: {record.get('summary') or 'the dispatch did not go through'}"
+        )
+
     if record.get("finished_at"):
         return (
             f"`{record['product']}` on `{record['server']}` — id `{record['id']}`, "
@@ -483,20 +496,39 @@ def _describe(record: dict) -> str:
 
 # ── door 2: test servers ─────────────────────────────────────────────────────
 
-async def _dispatch_and_log(**kwargs) -> None:
-    """Dispatch after the reply has gone, and say loudly if it did not work.
+async def _dispatch_and_log(store: JobStore, **kwargs) -> None:
+    """Dispatch after the reply has gone, and RECORD it if it did not work.
 
     The user has already been told the run is on its way, so a failure here has
-    no reply to travel back on -- the edge cannot post to Slack. It is logged at
-    WARNING with the correlation id, which is the id the user was given, so the
-    two can be matched. Surfacing it in the tab's History is NEH-1153.
+    no reply to travel back on -- and the edge holds no Slack bot token, so it
+    cannot correct that either. Logging it was the whole of this function once,
+    and a log is somewhere the person waiting cannot see: the run simply never
+    reported, which is silence reading as success (NEH-1156).
+
+    So the record is updated to `not_dispatched`, a state that means "never
+    started" and is deliberately NOT `failed`, which means "ran and did not
+    pass". `results` reports it, and the tab shows it without new plumbing.
+
+    The reason stored is written for a USER. GitHub's own error bodies carry
+    repository names, and those stay in `log_detail` and in the log.
     """
     result = await dispatch_workflow(**kwargs)
-    cid = kwargs.get("correlation_id")
+    cid = str(kwargs.get("correlation_id", ""))
     if result.ok:
         log.info("gh-action %s dispatched", cid)
-    else:
-        log.warning("gh-action %s NOT dispatched: %s", cid, result.log_detail or result.message)
+        return
+
+    log.warning("gh-action %s NOT dispatched: %s", cid, result.log_detail or result.message)
+    try:
+        # `result.message` is the user-facing half of DispatchResult, which is
+        # the half that may be stored somewhere a person reads.
+        if not store.mark_not_dispatched(cid, result.message):
+            # It did not apply, which means something else already moved the
+            # row -- worth a line, because a silent no-op here would put the
+            # original defect straight back.
+            log.warning("gh-action %s could not be marked not_dispatched", cid)
+    except StoreError:
+        log.warning("gh-action %s: the store refused the not_dispatched mark", cid)
 
 
 @app.post("/runner/enroll")

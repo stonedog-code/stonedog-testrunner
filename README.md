@@ -503,6 +503,19 @@ Checked, not assumed:
 - **Non-vacuity, V1/V2:** three vulnerabilities were planted — always-true
   signature, removed replay window, unrestricted product — and each was caught
   by the suite; green again after restore.
+- **Non-vacuity, `not_dispatched` (NEH-1156):** four plants, each restored —
+  the edge no longer recording a failed dispatch (the original defect); a
+  never-started run reported as an ordinary queued one; the `runner_id IS NULL`
+  guard dropped, so a stray dispatch failure could overwrite a job a runner was
+  executing; and `not_dispatched` counted as ACTIVE, so a run that will never
+  happen holds a cap forever.
+- **A test that passed against the defect it was written for.** The
+  `runner_id` plant was MISSED at first: the test claimed a job and asserted it
+  was untouched, but a CLAIMED job is excluded by the state list alone, so it
+  proved nothing about the runner check. It now calls `mark_running` to reach
+  the one state where the two guards differ. This is the second time in this
+  file's history that a guard's test had to be moved to where the guard
+  actually applies.
 - **Non-vacuity, the job API (NEH-1157):** five plants, each restored — the
   admin token comparison always succeeding; an UNSET token opening the API
   rather than closing it (`"" == ""`, the empty-allowlist bug applied to a

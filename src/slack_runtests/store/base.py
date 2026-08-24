@@ -41,9 +41,23 @@ from typing import Any, Iterable
 
 #: Every state a job can be in. `queued` and `claimed` are the only two a
 #: reaper ever moves between; the rest are terminal or runner-driven.
-QUEUED, CLAIMED, RUNNING, DONE, FAILED, ABANDONED = (
-    "queued", "claimed", "running", "done", "failed", "abandoned",
+QUEUED, CLAIMED, RUNNING, DONE, FAILED, ABANDONED, NOT_DISPATCHED = (
+    "queued", "claimed", "running", "done", "failed", "abandoned", "not_dispatched",
 )
+
+#: `not_dispatched` is a DIFFERENT FACT from `failed`, and the two must never
+#: share a state.
+#:
+#: `failed` means the suite ran and did not pass. `not_dispatched` means it
+#: never started -- GitHub refused the workflow, or could not be reached. A
+#: reader who cannot tell those apart will go looking for a test failure that
+#: does not exist, and a History surface built on a shared state would report
+#: the wrong one with complete confidence.
+#:
+#: It exists because the gh-action dispatch happens AFTER the reply to Slack has
+#: gone (NEH-1156). The user has already been told the run is on its way, the
+#: edge holds no bot token and cannot correct that, so the record is the only
+#: place the truth can live.
 
 #: What "this job is occupying a slot" means. A queued job counts: it has been
 #: promised to somebody and will run. Anything terminal does not.
@@ -456,6 +470,21 @@ class JobStore(ABC):
         """
 
     @abstractmethod
+    def mark_not_dispatched(self, job_id: str, reason: str,
+                            now: float | None = None) -> bool:
+        """Record that a job never started. True if this call changed the row.
+
+        Only from QUEUED. A job a runner has already claimed is somebody else's
+        to finish, and a dispatch failure arriving late must not overwrite a
+        real result -- so the state is in the WHERE clause rather than checked
+        first, which is the same shape `finish` uses and for the same reason.
+
+        `reason` is stored in `summary` and is written for a USER: GitHub's own
+        error bodies carry repository names and belong in the log, never in a
+        column something renders.
+        """
+
+    @abstractmethod
     def renew(self, runner_id: str, lease_seconds: float, now: float | None = None) -> int: ...
 
     @abstractmethod
@@ -524,7 +553,7 @@ class JobStore(ABC):
 
 
 __all__ = [
-    "ABANDONED", "ACTIVE_STATES", "BUSY_STATES", "CLAIMED", "Caps", "DONE",
+    "ABANDONED", "ACTIVE_STATES", "NOT_DISPATCHED", "BUSY_STATES", "CLAIMED", "Caps", "DONE",
     "EnqueueResult", "FAILED", "Job", "JobStore", "MAX_FIELD", "MAX_SUMMARY",
     "NO_CAPS", "QUEUED", "RUNNING", "StoreBusy", "StoreError", "StoreUnavailable",
     "now_or", "runner_view", "validate_job", "validate_runner",
