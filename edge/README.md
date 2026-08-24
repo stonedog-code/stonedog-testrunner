@@ -56,6 +56,73 @@ else.
 | `SLACK_DEFAULT_CHANNEL` | `#testing` | Where results go if the payload carries no channel. |
 | `RUNTESTS_INSECURE_DEV` | *(empty)* | Start anyway with all of the above absent. **Local development only.** Warns, on every start, naming each protection it is ignoring. |
 
+### Finding the values
+
+Three of the four are IDs rather than secrets, and the Slack UI is a poor place
+to look for them — the "About this workspace" pane and the channel-details pane
+do not reliably show them, and which panes do changes between Slack versions.
+Ask something that cannot go stale instead.
+
+**`SLACK_TEAM_ID` — from the API, with any bot token you already have.**
+`auth.test` requires **no scopes at all**, so a token minted for something else
+entirely will answer it:
+
+```bash
+curl -sS -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
+  https://slack.com/api/auth.test | jq '{team, team_id, url}'
+```
+
+```json
+{ "team": "Example Corp", "team_id": "T0XXXXXXXXX", "url": "https://example.slack.com/" }
+```
+
+**`RUNTESTS_CHANNELS` — from a channel link.** Right-click the channel in the
+sidebar → **Copy → Copy link**:
+
+```
+https://example.slack.com/archives/C0XXXXXXXXX
+                                   ^^^^^^^^^^^ the channel id
+```
+
+Or open Slack in a **browser**, where the address bar carries both at once and
+neither depends on a menu staying where it is:
+
+```
+https://app.slack.com/client/T0XXXXXXXXX/C0XXXXXXXXX
+                             team id     channel id
+```
+
+**`RUNTESTS_USERS` — the one the UI does well.** Click the person → their
+profile → the three-dot menu → **Copy member ID** (`U…`).
+
+**Listing channels via the API needs a scope you may not have.**
+`conversations.list` and `conversations.info` require `channels:read` (plus
+`groups:read` for private channels). A token granted only `chat:write` — which
+is all a deploy-notification bot needs — answers `missing_scope`, and that is
+not a sign anything is wrong. Use the link method, or add the scope and
+reinstall if you will want it repeatedly.
+
+**`SLACK_SIGNING_SECRET` is the only one that is genuinely a secret**, and the
+only one with no discovery trick: it is created with the app and is read from
+its **Basic Information → App Credentials** page.
+
+### Storing them
+
+Wherever these end up — a `.env`, a secrets manager — write the value in a
+**zsh-safe** way. In zsh `read -rs -p "Secret: "` does not prompt: `-p` means
+*read from the coprocess*, so the read never happens, the variable stays unset,
+and whatever consumes it stores an **empty string** while reporting success.
+Nothing errors. Use one of:
+
+```bash
+printf 'Signing secret: '; stty -echo; read -r SIGNING; stty echo; printf '\n'
+read -rs "SIGNING?Signing secret: "      # zsh's own form
+[ -n "$SIGNING" ] || echo "REFUSING: empty"
+```
+
+The last line is the point. A write path for a credential should refuse an empty
+value rather than trust that the variable got set.
+
 ### The edge refuses to start without them
 
 **An empty allowlist used to mean "allow everyone".** The check read
