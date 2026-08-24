@@ -95,3 +95,113 @@ def test_valid_origin_with_invalid_structure_is_refused(edge) -> None:
     # person who sees their own input reflected is the person who typed it.
     # The same string in a channel message would be a different question.
     assert "webapp" in text and "billing" in text
+
+
+# ── 4. the command must MATCH A JOB DEFINITION (A2.2.2) ─────────────────────
+#
+# Proving you are Slack is not enough, and being on the allowlist is not enough
+# either. The allowlist says a value MAY be named; a job definition says what
+# happens when it is. These four cases are the difference.
+
+
+def test_an_allowlisted_command_with_no_matching_job_is_refused(edge) -> None:
+    """`catalog` is on the product allowlist; no job is defined for `full`.
+
+    This is the case the allowlist alone cannot catch — every token is
+    permitted, and there is still nothing to run.
+    """
+    response = post(edge, slack_body("-p catalog -s local"))
+    assert response.status_code == 200, response.text
+    text = response.json()["text"]
+    assert "No job matches" in text
+    assert "Queued" not in text, "it must not queue a job it could not resolve"
+
+
+def test_the_refusal_names_what_WOULD_have_matched(edge) -> None:
+    """A2.2.2 requires the suggestion, and it is the whole difference between a
+    refusal somebody can act on and one that reads as the bot being broken.
+
+    Asserted on CONTENT, not merely on being a refusal: "No job matches" with an
+    empty suggestion list satisfies the test above and helps nobody.
+    """
+    response = post(edge, slack_body("-p webapp -s nowhere --test_scope smoke"))
+    text = response.json()["text"]
+    # `nowhere` is not on the server allowlist, so this is refused by the
+    # grammar before resolution — and the grammar names the allowed values.
+    assert "nowhere" in text and "choose from" in text
+
+
+def test_a_near_miss_on_one_token_is_suggested_by_name(edge) -> None:
+    """Differing in exactly ONE token is a suggestion, and it names the job.
+
+    `catalog` on `local` is undefined; `catalog` on `staging` and on `dev` are
+    defined and differ in one token. Asserted on CONTENT — "No job matches" with
+    an empty suggestion list would satisfy the previous test and help nobody.
+    """
+    response = post(edge, slack_body("-p catalog -s local"))
+    text = response.json()["text"]
+    assert "Did you mean" in text, text
+    assert "catalog" in text
+    # The suggestion is the CANONICAL flag form, which is what a person reads in
+    # a definition even though positionals are what they type.
+    assert "--product catalog" in text
+
+
+def test_a_resolved_job_still_goes_through_the_queue(edge) -> None:
+    """The `test-server` action kind is unchanged behaviour.
+
+    v1 and v2 differ by a ROW, not a deployment: this job's action is
+    `test-server`, so it queues exactly as it always did. A `gh-action` job
+    dispatches instead, and that path is unit-tested with the HTTP call faked —
+    an integration test of it would either hit the real GitHub API or prove
+    nothing.
+    """
+    response = post(edge, slack_body("-p webapp -s dev --test_scope smoke"))
+    text = response.json()["text"]
+    assert "Queued" in text
+    assert "webapp" in text and "dev" in text
+
+
+# ── 5. a gh-action job must not run twice from one command ──────────────────
+
+
+def test_a_gh_action_command_is_acknowledged_without_waiting(edge) -> None:
+    """The ack, and the fact that it is an ack rather than a result.
+
+    The dispatch happens in a background task so the reply is inside Slack's
+    three-second budget however slow GitHub is. What comes back names the job
+    and the correlation id; the RESULT is posted later, by the workflow.
+    """
+    response = post(edge, slack_body("-p billing -s local"))
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["response_type"] == "ephemeral"
+    assert "Dispatching" in payload["text"], payload["text"]
+    assert "gh dispatch 1" in payload["text"], "the job's name, so the user knows which ran"
+
+
+def test_slacks_retry_does_not_dispatch_the_workflow_a_second_time(edge) -> None:
+    """THE BUG THIS EXISTS FOR, found in review.
+
+    Slack retries any command it does not hear back from in three seconds, and
+    the first version of the gh-action branch returned BEFORE reaching the
+    store — so nothing refused a repeat, and a slow GitHub answer meant one
+    command ran the suite TWICE.
+
+    The fix is to record the dispatch before making it: `job_id` is derived from
+    `trigger_id`, so the PRIMARY KEY refuses the second. This sends the SAME
+    trigger_id twice, which is exactly what a Slack retry is.
+    """
+    # Its OWN (product, server): the cap is 1 active per pair, so sharing one
+    # with the test above would get this refused by the cap before it could
+    # reach the duplicate path.
+    body = slack_body("-p webapp -s local", trigger_id="retry-me-once")
+
+    first = post(edge, body)
+    second = post(edge, body)
+
+    assert "Dispatching" in first.json()["text"], first.json()["text"]
+    # The second is refused as a duplicate, NOT acknowledged again. A second
+    # "Dispatching" here would mean two workflow runs from one command.
+    assert "already queued" in second.json()["text"], second.json()["text"]
+    assert "Dispatching" not in second.json()["text"]

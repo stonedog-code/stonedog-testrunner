@@ -148,6 +148,28 @@ APP_PORT=18080
 ENV
 compose embedded up -d --wait --wait-timeout 180 >/dev/null 2>&1 || true
 
+# SEED ONE JOB DEFINITION.
+#
+# A command must match a stored definition to run anything, so a stack with none
+# refuses every command — correct, and useless as an example. A reader who
+# copies this should see it work, not see it refuse.
+#
+# Done through the running container rather than by mounting a file, because the
+# edge owns its schema and creates it at startup; writing the database from
+# outside would race that. A versionable jobs file is phase 7 and will replace
+# this.
+compose embedded exec -T edge python -c "
+import os
+from slack_runtests.store import JobDef, open_store
+store = open_store(os.environ.get('EDGE_DB_PATH') or os.environ['EDGE_DB_DSN'])
+store.save_job_def(JobDef(
+    id='example-1', name='webapp smoke',
+    product='webapp', test_scope='smoke', server='staging',
+    action_kind='test-server', action_target='any',
+))
+print('seeded', store.count_job_defs(), 'job definition(s)')
+" >/dev/null 2>&1 || true
+
 embedded_logs="$(compose embedded logs edge 2>&1 || true)"
 contains 'the sidecar opened a POSTGRES store' 'store ready: postgres' "$embedded_logs"
 # The DSN carries a password. It must not reach the log.

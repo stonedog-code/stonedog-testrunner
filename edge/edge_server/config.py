@@ -11,6 +11,22 @@ from slack_runtests.slack import DEFAULT_CHANNEL
 from slack_runtests.store import Caps, backend_for
 
 
+def _pairs(name: str) -> dict[str, str]:
+    """`a=1,b=2` into a dict. A malformed entry is skipped, not raised on.
+
+    This map only ever narrows: a product with no entry falls back to
+    GITHUB_REPO. So a typo costs a wrong repository at dispatch time, which
+    fails loudly against the GitHub API, whereas raising here would take the
+    process down over a stray comma.
+    """
+    out: dict[str, str] = {}
+    for part in os.environ.get(name, "").split(","):
+        key, sep, value = part.partition("=")
+        if sep and key.strip() and value.strip():
+            out[key.strip()] = value.strip()
+    return out
+
+
 def _csv(name: str, default: str = "") -> frozenset[str]:
     raw = os.environ.get(name, default)
     return frozenset(part.strip() for part in raw.split(",") if part.strip())
@@ -41,6 +57,26 @@ class EdgeConfig:
     allowed_products: frozenset[str] = field(default_factory=lambda: _csv("RUNTESTS_PRODUCTS"))
     allowed_servers: frozenset[str] = field(default_factory=lambda: _csv("RUNTESTS_SERVERS"))
     allowed_test_scopes: frozenset[str] = field(default_factory=lambda: _csv("RUNTESTS_TEST_SCOPES"))
+
+    # ── GitHub dispatch, for a job whose action is `gh-action` (NEH-1152) ────
+    #
+    # WHICH REPOS MAY BE DISPATCHED TO IS CODE/ENV, NEVER A ROW (A2.3). A job
+    # definition names a WORKFLOW; the repository it lives in is resolved here,
+    # from configuration, so adding a job can never widen which repositories
+    # this token is pointed at.
+    github_token: str = field(default_factory=lambda: os.environ.get("GITHUB_TOKEN", ""))
+    github_repo: str = field(default_factory=lambda: os.environ.get("GITHUB_REPO", ""))
+    github_ref: str = field(default_factory=lambda: os.environ.get("GITHUB_REF_NAME", "main"))
+
+    #: `product=owner/repo` pairs. A product with no entry falls back to
+    #: GITHUB_REPO, which is what a single-repo deployment sets and nothing else.
+    product_repos: dict[str, str] = field(
+        default_factory=lambda: _pairs("RUNTESTS_PRODUCT_REPOS")
+    )
+
+    def repo_for(self, product: str) -> str:
+        """The repository to dispatch `product` to, or the flat default."""
+        return self.product_repos.get(product) or self.github_repo
 
     def grammar(self) -> "Grammar":
         return Grammar.of(self.allowed_products, self.allowed_servers, self.allowed_test_scopes)
