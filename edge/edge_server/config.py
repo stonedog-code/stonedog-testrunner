@@ -5,6 +5,8 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 
+from slack_runtests.parsing import Grammar
+
 from slack_runtests.slack import DEFAULT_CHANNEL
 from slack_runtests.store import Caps, backend_for
 
@@ -31,6 +33,17 @@ class EdgeConfig:
     allowed_team: str = field(default_factory=lambda: os.environ.get("SLACK_TEAM_ID", ""))
     allowed_channels: frozenset[str] = field(default_factory=lambda: _csv("RUNTESTS_CHANNELS"))
     allowed_users: frozenset[str] = field(default_factory=lambda: _csv("RUNTESTS_USERS"))
+
+    # The trigger allowlists (PRD §4.1, A2.10). Read from the same variables as
+    # the V1 server, because a command must mean the same thing whichever
+    # process authorises it -- two deployments of one product disagreeing about
+    # what `--product` may be is a boundary with a hole in it.
+    allowed_products: frozenset[str] = field(default_factory=lambda: _csv("RUNTESTS_PRODUCTS"))
+    allowed_servers: frozenset[str] = field(default_factory=lambda: _csv("RUNTESTS_SERVERS"))
+    allowed_test_scopes: frozenset[str] = field(default_factory=lambda: _csv("RUNTESTS_TEST_SCOPES"))
+
+    def grammar(self) -> "Grammar":
+        return Grammar.of(self.allowed_products, self.allowed_servers, self.allowed_test_scopes)
 
     # ── the store ────────────────────────────────────────────────────────────
     #: The default, and the reason a standalone runner needs no database: a

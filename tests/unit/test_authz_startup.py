@@ -27,6 +27,13 @@ CONFIGURED = {
     "allowed_team": "T_ALLOWED",
     "allowed_channels": frozenset({"C_ALLOWED"}),
     "allowed_users": frozenset(),
+    # The trigger allowlists joined this gate in NEH-1139. They answer a
+    # different question from the three above -- "may this VALUE ever be named"
+    # rather than "is this CALLER allowed" -- but they fail identically: a
+    # process facing the internet protecting less than its operator believes.
+    "allowed_products": frozenset({"alpha"}),
+    "allowed_servers": frozenset({"sandbox"}),
+    "allowed_test_scopes": frozenset({"smoke"}),
 }
 
 
@@ -38,15 +45,23 @@ def test_a_configured_process_is_missing_nothing() -> None:
     assert missing_protections(**CONFIGURED) == []
 
 
-def test_an_unconfigured_process_is_missing_all_three() -> None:
+def test_an_unconfigured_process_is_missing_every_protection() -> None:
     missing = missing_protections(
         signing_secret="", allowed_team="", allowed_channels=(), allowed_users=(),
+        allowed_products=(), allowed_servers=(), allowed_test_scopes=(),
     )
-    assert len(missing) == 3
+    # The COUNT, not just the membership. Six settings named six times is what
+    # distinguishes this from a check that found one and stopped -- and the
+    # number is the only thing that would move if a seventh were added and its
+    # entry silently collided with an existing one.
+    assert len(missing) == 6
     joined = " ".join(missing)
     assert "SLACK_SIGNING_SECRET" in joined
     assert "SLACK_TEAM_ID" in joined
     assert "RUNTESTS_CHANNELS" in joined and "RUNTESTS_USERS" in joined
+    assert "RUNTESTS_PRODUCTS" in joined
+    assert "RUNTESTS_SERVERS" in joined
+    assert "RUNTESTS_TEST_SCOPES" in joined
 
 
 @pytest.mark.parametrize(
@@ -55,6 +70,12 @@ def test_an_unconfigured_process_is_missing_all_three() -> None:
         ({"signing_secret": ""}, "SLACK_SIGNING_SECRET"),
         ({"allowed_team": ""}, "SLACK_TEAM_ID"),
         ({"allowed_channels": frozenset()}, "RUNTESTS_CHANNELS"),
+        # Named one per line rather than as a single "allowlists" entry: an
+        # operator who set two of the three would otherwise be told nothing
+        # about which one they missed.
+        ({"allowed_products": frozenset()}, "RUNTESTS_PRODUCTS"),
+        ({"allowed_servers": frozenset()}, "RUNTESTS_SERVERS"),
+        ({"allowed_test_scopes": frozenset()}, "RUNTESTS_TEST_SCOPES"),
     ],
 )
 def test_each_protection_is_checked_on_its_own(override: dict, expected: str) -> None:

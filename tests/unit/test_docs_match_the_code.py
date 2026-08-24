@@ -48,7 +48,13 @@ DOC_FILES = ("README.md", "edge/README.md", "test-server/README.md", ".env.examp
 _NAME = r"[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+"
 
 #: `os.environ.get("X")`, `os.environ["X"]`, `os.getenv("X")`, and this repo's
-#: `_csv`/`_num` helpers.
+#: `_csv`/`_num`/`_pairs` helpers.
+#:
+#: `_pairs` was added with NEH-1139 and the guard reported the new variable as
+#: "read by no code" until it was listed here. That failure was CORRECT and is
+#: worth leaving a note about: the guard cannot see through a helper it has not
+#: been told about, so a new one silently opts its variables out of the check.
+#: Teaching it the helper is the fix; exempting the variable would not be.
 #:
 #: `os.getenv` appears nowhere in this repository today, and is matched anyway.
 #: It is the most common way to read an environment variable in Python, so the
@@ -56,7 +62,7 @@ _NAME = r"[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+"
 #: this entire check — and the variables this check protects are the ones whose
 #: absence leaves a public endpoint unprotected.
 READS = re.compile(
-    r'(?:os\.environ(?:\.get)?[\(\[]|os\.getenv\(|_csv\(|_num\()\s*"(' + _NAME + r')"'
+    r'(?:os\.environ(?:\.get)?[\(\[]|os\.getenv\(|_csv\(|_num\(|_pairs\()\s*"(' + _NAME + r')"'
 )
 #: A name held in a constant — `INSECURE_DEV_ENV = "RUNTESTS_INSECURE_DEV"`.
 #: `authz.py` reads its variable through one, so without this the scanner cannot

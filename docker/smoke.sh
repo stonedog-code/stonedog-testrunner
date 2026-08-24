@@ -124,6 +124,9 @@ docker run -d --rm --name "$CONTAINER" \
   -e SLACK_SIGNING_SECRET=smoke-secret \
   -e SLACK_TEAM_ID=T_SMOKE \
   -e RUNTESTS_CHANNELS=C_SMOKE \
+  -e RUNTESTS_PRODUCTS=webapp \
+  -e RUNTESTS_SERVERS=staging \
+  -e RUNTESTS_TEST_SCOPES=smoke \
   -e HOST=0.0.0.0 \
   -e EDGE_DB_PATH=/app/data/edge.db \
   -e EDGE_KEY_PATH=/app/keys/edge.pem \

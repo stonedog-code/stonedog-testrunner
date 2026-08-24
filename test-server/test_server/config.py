@@ -7,6 +7,11 @@ import socket
 from dataclasses import dataclass, field
 
 
+def _csv(name: str) -> frozenset[str]:
+    raw = os.environ.get(name, "")
+    return frozenset(part.strip() for part in raw.split(",") if part.strip())
+
+
 def _num(name: str, default: float) -> float:
     try:
         return float(os.environ.get(name, "") or default)
@@ -39,6 +44,28 @@ class RunnerConfig:
         default_factory=lambda: tuple(
             x.strip() for x in os.environ.get("RUNNER_LABELS", "").split(",") if x.strip()
         )
+    )
+
+    # ── the trigger allowlists, read from THIS machine's environment ─────────
+    #
+    # Deliberately not taken from the job, and deliberately not fetched from the
+    # edge. `agent.validate()` exists because a signature proves WHO sent a job,
+    # not that its contents are sane -- so if the allowlist arrived with the job
+    # or over the wire from the edge, a compromised edge would simply send a
+    # wider one and the re-check would agree with it.
+    #
+    # Same variable names as the edge, because a command must mean the same
+    # thing wherever it is authorised. In a deployment where the two disagree,
+    # the runner's is the one that decides what actually executes -- which is
+    # the correct way round.
+    allowed_products: frozenset[str] = field(
+        default_factory=lambda: _csv("RUNTESTS_PRODUCTS")
+    )
+    allowed_servers: frozenset[str] = field(
+        default_factory=lambda: _csv("RUNTESTS_SERVERS")
+    )
+    allowed_test_scopes: frozenset[str] = field(
+        default_factory=lambda: _csv("RUNTESTS_TEST_SCOPES")
     )
 
     #: One-time bootstrap token. Only consulted the first time this id enrols;

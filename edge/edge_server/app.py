@@ -80,6 +80,9 @@ async def _startup_gate(app: FastAPI):
         allowed_team=cfg.allowed_team,
         allowed_channels=cfg.allowed_channels,
         allowed_users=cfg.allowed_users,
+        allowed_products=cfg.allowed_products,
+        allowed_servers=cfg.allowed_servers,
+        allowed_test_scopes=cfg.allowed_test_scopes,
     )
     if refusal is not None:
         # LOGGED, then raised with one line. Raising the whole block gets it
@@ -112,6 +115,17 @@ async def _startup_gate(app: FastAPI):
         store = open_store(cfg.store_dsn, busy_timeout=cfg.db_busy_timeout)
         app.state.store = store
     log.info("store ready: %s", store.backend)
+
+    # THE COUNTS, not just the names. `allowlists loaded` over three empty sets
+    # and over three populated ones is the same line, and the count is the only
+    # thing that distinguishes a boundary from a boundary-shaped hole. Startup
+    # refuses an empty allowlist outright, so a zero here can only appear under
+    # RUNTESTS_INSECURE_DEV -- which is exactly when it most needs saying.
+    g = cfg.grammar()
+    log.info(
+        "trigger allowlists: %d product(s) · %d server(s) · %d test scope(s)",
+        len(g.products), len(g.servers), len(g.test_scopes),
+    )
     yield
 
 app = FastAPI(title="slack-runtests-edge", lifespan=_startup_gate)
@@ -252,6 +266,7 @@ async def slack_commands(request: Request) -> JSONResponse:
         allowed_team=cfg.allowed_team,
         allowed_channels=cfg.allowed_channels,
         allowed_users=cfg.allowed_users,
+        grammar=cfg.grammar(),
     )
     if not outcome.ok:
         if outcome.status != 200:

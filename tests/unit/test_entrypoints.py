@@ -170,6 +170,13 @@ def test_a_configured_server_serves(
     monkeypatch.setenv("SLACK_SIGNING_SECRET", "s3cr3t")
     monkeypatch.setenv("SLACK_TEAM_ID", "T_ALLOWED")
     monkeypatch.setenv("RUNTESTS_CHANNELS", "C_ALLOWED")
+    # NEH-1139: a "configured" process now means six settings, not three. The
+    # trigger allowlists refuse startup when unset exactly like the other three,
+    # so this positive control has to satisfy them too -- otherwise it stops
+    # proving that the gate does not simply refuse everything.
+    monkeypatch.setenv("RUNTESTS_PRODUCTS", "alpha,beta")
+    monkeypatch.setenv("RUNTESTS_SERVERS", "sandbox")
+    monkeypatch.setenv("RUNTESTS_TEST_SCOPES", "smoke")
     for name, value in extra_env.items():
         monkeypatch.setenv(name, value or str(tmp_path / name.lower()))
 

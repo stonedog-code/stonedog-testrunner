@@ -54,12 +54,19 @@ dev_mode_if_unconfigured() {
   if [ -n "${RUNTESTS_INSECURE_DEV:-}" ]; then
     return
   fi
+  # The trigger allowlists count here too (NEH-1139). An operator who set
+  # RUNTESTS_PRODUCTS and nothing else is configuring this deliberately, and the
+  # same reasoning applies: they deserve the gate naming what is still missing,
+  # not a launcher that decides for them.
   if [ -n "${SLACK_SIGNING_SECRET:-}" ] || [ -n "${SLACK_TEAM_ID:-}" ] \
-     || [ -n "${RUNTESTS_CHANNELS:-}" ] || [ -n "${RUNTESTS_USERS:-}" ]; then
+     || [ -n "${RUNTESTS_CHANNELS:-}" ] || [ -n "${RUNTESTS_USERS:-}" ] \
+     || [ -n "${RUNTESTS_PRODUCTS:-}" ] || [ -n "${RUNTESTS_SERVERS:-}" ] \
+     || [ -n "${RUNTESTS_TEST_SCOPES:-}" ]; then
     return
   fi
-  printf 'no Slack protection configured at all — setting RUNTESTS_INSECURE_DEV=1 for local dev\n' >&2
-  printf 'set any one of SLACK_SIGNING_SECRET / SLACK_TEAM_ID / RUNTESTS_CHANNELS / RUNTESTS_USERS\n' >&2
+  printf 'no protection configured at all — setting RUNTESTS_INSECURE_DEV=1 for local dev\n' >&2
+  printf 'set any one of SLACK_SIGNING_SECRET / SLACK_TEAM_ID / RUNTESTS_CHANNELS /\n' >&2
+  printf 'RUNTESTS_USERS / RUNTESTS_PRODUCTS / RUNTESTS_SERVERS / RUNTESTS_TEST_SCOPES\n' >&2
   printf 'and this stops, so a half-configured server refuses to start instead.\n' >&2
   export RUNTESTS_INSECURE_DEV=1
 }

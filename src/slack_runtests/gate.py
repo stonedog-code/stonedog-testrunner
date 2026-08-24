@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 from typing import Mapping
 
 from . import signature
-from .parsing import USAGE_HINT, SlackArgError, parse
+from .parsing import Grammar, SlackArgError, parse
 
 log = logging.getLogger(__name__)
 
@@ -59,6 +59,7 @@ def check(
     allowed_team: str = "",
     allowed_channels: frozenset[str] = frozenset(),
     allowed_users: frozenset[str] = frozenset(),
+    grammar: Grammar | None = None,
 ) -> Outcome:
     """Run all four checks over the RAW request body.
 
@@ -103,9 +104,18 @@ def check(
         return Outcome(ok=False, message="You are not on the test-automation allowlist.", form=form)
 
     # ── 4. Is the wording on the allowlist? ──────────────────────────────────
+    # `grammar` has no permissive default. An omitted argument produces an empty
+    # Grammar, which `parse` refuses outright -- a caller that forgets to pass
+    # the allowlists gets a refusal, never a wildcard. The alternative, defaulting
+    # to "everything", is the exact shape of the bug NEH-1119 fixed one layer up.
+    grammar = grammar if grammar is not None else Grammar.of((), (), ())
     try:
-        args = parse(str(form.get("text", "")))
+        args = parse(str(form.get("text", "")), grammar)
     except SlackArgError as error:
-        return Outcome(ok=False, message=f"`/runtests`: {error}\n{USAGE_HINT}", form=form)
+        return Outcome(
+            ok=False,
+            message=f"`/runtests`: {error}\n{grammar.usage_hint()}",
+            form=form,
+        )
 
     return Outcome(ok=True, args=args, form=form, unverified=unverified)

@@ -26,6 +26,29 @@ from slack_runtests.signature import sign
 TEST_SIGNING_SECRET = "integration-test-signing-secret"
 TEST_TEAM_ID = "T_INTEGRATION"
 TEST_CHANNEL_ID = "C_INTEGRATION"
+
+# The trigger allowlists these servers are launched with (NEH-1139). Fictional
+# on purpose: a real product name in a test fixture is a real product name
+# shipped in this repository, which test_no_house_names_in_defaults.py exists to
+# prevent -- and it would also make the fixture a claim about the author's
+# estate rather than about the code.
+#
+# One server and one test scope, so a command needs neither flag: the parser
+# defaults a sole allowed value, and these tests are about the doors rather than
+# about the grammar.
+# These match the FIXTURE SUITE on disk -- `fixture_suite/webapp/` -- because
+# the runner builds `tests/{product}` as a path, so the allowlist and the
+# directory have to agree. They are generic placeholders rather than house
+# names, which is what `test_no_house_names_in_defaults.py` actually bans, so
+# there is nothing here to launder into a shipped default.
+#
+# The UNIT tests use a deliberately different vocabulary (`alpha`, `sandbox`)
+# for a reason worth keeping: a test that imports the allowlist and then asserts
+# the allowlist accepts it cannot fail. Here the values come from the fixture on
+# disk instead, which is a real constraint rather than a restatement.
+TEST_PRODUCTS = "webapp,billing,catalog"
+TEST_SERVERS = "staging,dev,local"
+TEST_TEST_SCOPES = "smoke"
 TEST_CHANNEL_NAME = "testing"
 TEST_USER_ID = "U_INTEGRATION"
 

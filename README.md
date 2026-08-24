@@ -503,6 +503,23 @@ Checked, not assumed:
 - **Non-vacuity, V1/V2:** three vulnerabilities were planted — always-true
   signature, removed replay window, unrestricted product — and each was caught
   by the suite; green again after restore.
+- **Non-vacuity, the trigger allowlists (NEH-1139):** four plants, each
+  restored — the startup gate no longer requiring them; `parse` treating an
+  empty allowlist as "allow everything"; the test server skipping its
+  execution-time re-check when its own allowlist is empty; and `gate.check`
+  defaulting to a permissive grammar. **The fourth was caught by nothing**, and
+  that is why the plants were worth doing: a wide-open fallback is invisible in
+  review precisely because it is a default. `test_gate_check_without_a_grammar_
+  refuses_rather_than_allowing_anything` was written for it, and two of the
+  first four plants had to be redone because they were no-ops that the suite
+  "passed" without ever being applied — the reason a plant's application is
+  asserted rather than assumed.
+- **The gate, end to end, in three directions:** with the three allowlists
+  unset the process refuses and names each one with a reason; with them set to
+  the EMPTY STRING it refuses identically, which is the distinction that makes
+  an allowlist a boundary rather than a formality; with all six settings present
+  it starts and reports `2 product(s) · 1 server(s) · 2 test scope(s)` — the
+  counts, because `allowlists loaded` says the same thing over three empty sets.
 - **Non-vacuity, integration tier:** three more were planted, one per test —
   always-true signature (caught by the invalid-origin test), `../../etc` and
   `prod` added to the allowlists (caught by the invalid-structure test), and a

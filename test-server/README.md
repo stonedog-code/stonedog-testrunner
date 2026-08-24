@@ -129,6 +129,20 @@ channel went quiet.
   prototype scraped the summary line and said in its own comments that this was
   a compromise. Reading the report pytest already wrote gives exact numbers and
   is the only way to name the failed tests.
+A test server reads the trigger allowlists from **its own** environment:
+
+| Variable | Default | What it does |
+|---|---|---|
+| `RUNTESTS_PRODUCTS` | *(empty)* | Allowlist of products this server will run. Empty refuses every job. |
+| `RUNTESTS_SERVERS` | *(empty)* | Allowlist of environments. Empty refuses every job. |
+| `RUNTESTS_TEST_SCOPES` | *(empty)* | Allowlist of test scopes. Empty means the scope is not checked here. |
+
+**Deliberately not taken from the job, and deliberately not fetched from the
+edge.** If the allowlist arrived with the job or over the wire, a compromised
+edge would simply send a wider one and the re-check would agree with it. Where
+the two disagree, the runner's is what actually decides — which is the correct
+way round.
+
 - **`validate()` re-checks the job against the same allowlists the edge used.**
   A signature proves *who* sent a job, not that its contents are sane. If the
   edge is ever compromised, or grows a code path that skips a check, this is

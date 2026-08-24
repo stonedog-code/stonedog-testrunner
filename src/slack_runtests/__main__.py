@@ -40,6 +40,9 @@ def main() -> int:
         allowed_team=cfg.allowed_team,
         allowed_channels=cfg.allowed_channels,
         allowed_users=cfg.allowed_users,
+        allowed_products=cfg.allowed_products,
+        allowed_servers=cfg.allowed_servers,
+        allowed_test_scopes=cfg.allowed_test_scopes,
         # The app's lifespan does the announcing; it runs whichever way this
         # process was started, so warning here too would print it twice.
         warn=False,
