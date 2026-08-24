@@ -810,3 +810,78 @@ def test_the_reason_is_capped_like_every_other_stored_text(
     store.record_dispatch(make_job("gh-1"), mode="gh-action")
     store.mark_not_dispatched("gh-1", "x" * (MAX_SUMMARY * 3))
     assert len(store.job("gh-1")["summary"]) <= MAX_SUMMARY
+
+
+# ── a run knows which definition produced it (NEH-1167) ─────────────────────
+
+
+def test_a_run_carries_the_definition_that_produced_it(store: JobStore, make_job) -> None:
+    store.enqueue(make_job("r-1", job_def_id="jd-1"))
+    assert store.job("r-1")["job_def_id"] == "jd-1"
+
+
+def test_history_is_scoped_to_the_definition_and_nothing_else(
+    store: JobStore, make_job
+) -> None:
+    """THE WRONG ANSWER THIS EXISTS TO PREVENT.
+
+    Matching on product and server instead would give two definitions differing
+    only in `test_scope` a shared history belonging to neither — and a History
+    table showing the wrong runs looks exactly like one showing the right runs.
+
+    So these three runs share a product AND a server, and differ only by
+    definition. A product-or-server match returns all three.
+    """
+    store.enqueue(make_job("r-1", job_def_id="jd-1"))
+    store.enqueue(make_job("r-2", job_def_id="jd-1"))
+    store.enqueue(make_job("r-3", job_def_id="jd-2"))
+
+    assert {r["id"] for r in store.runs_for_job_def("jd-1")} == {"r-1", "r-2"}
+    assert {r["id"] for r in store.runs_for_job_def("jd-2")} == {"r-3"}
+
+
+def test_history_is_newest_first(store: JobStore, make_job) -> None:
+    store.enqueue(make_job("old", job_def_id="jd-1"), now=1000.0)
+    store.enqueue(make_job("new", job_def_id="jd-1"), now=2000.0)
+    assert [r["id"] for r in store.runs_for_job_def("jd-1")] == ["new", "old"]
+
+
+def test_a_definition_with_no_runs_has_an_empty_history(store: JobStore) -> None:
+    """A perfectly ordinary state for a new job, and not an error."""
+    assert store.runs_for_job_def("never-run") == []
+
+
+def test_a_run_with_no_definition_is_still_recorded_and_readable(
+    store: JobStore, make_job
+) -> None:
+    """Runs written before definitions existed have no id.
+
+    A migration that made this column required would make every one of them
+    unreadable — and the history is the thing being preserved.
+    """
+    store.enqueue(make_job("legacy"))
+    assert store.job("legacy")["job_def_id"] is None
+    assert any(r["id"] == "legacy" for r in store.recent(10))
+
+
+def test_deleting_a_definition_does_not_erase_its_runs(
+    store: JobStore, make_job, make_job_def
+) -> None:
+    """No foreign key with a cascade, on purpose. The run HAPPENED.
+
+    An orphaned `job_def_id` is correct: a reader says the definition is gone
+    rather than hiding what it did.
+    """
+    store.save_job_def(make_job_def(job_def_id="jd-1"))
+    store.enqueue(make_job("r-1", job_def_id="jd-1"))
+    assert store.delete_job_def("jd-1") is True
+
+    assert store.job("r-1") is not None
+    assert store.job("r-1")["job_def_id"] == "jd-1"
+    assert {r["id"] for r in store.runs_for_job_def("jd-1")} == {"r-1"}
+
+
+def test_a_dispatched_run_carries_it_too(store: JobStore, make_job) -> None:
+    """`record_dispatch` is the gh-action path and takes the same link."""
+    store.record_dispatch(make_job("gh-1", job_def_id="jd-1"), mode="gh-action")
+    assert store.runs_for_job_def("jd-1")[0]["id"] == "gh-1"

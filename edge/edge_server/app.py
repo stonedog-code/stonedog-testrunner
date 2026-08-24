@@ -356,6 +356,7 @@ async def slack_commands(request: Request, background: BackgroundTasks) -> JSONR
                     id=job_id, product=args.product, server=args.server,
                     select_expr=args.select, marker=args.marker,
                     slack_channel=channel, slack_user=str(form.get("user_id", "")),
+                    job_def_id=job_def.id,
                 ),
                 mode=ActionKind.GH_ACTION.value,
                 caps=cfg.caps,
@@ -408,6 +409,11 @@ async def slack_commands(request: Request, background: BackgroundTasks) -> JSONR
         marker=args.marker,
         slack_channel=channel,
         slack_user=str(form.get("user_id", "")),
+        # The definition this command matched. Recorded on the RUN so History
+        # can answer honestly: matching on product and server instead would
+        # give two definitions differing only in test_scope a shared history
+        # belonging to neither (NEH-1167).
+        job_def_id=job_def.id,
     )
     try:
         outcome = store.enqueue(job, caps=cfg.caps)
@@ -938,6 +944,26 @@ async def put_job(job_def_id: str, request: Request) -> Response:
             cfg, cfg.repo_for(product), job_def.action_target
         )
     return JSONResponse(payload, status_code=201 if result is SaveResult.CREATED else 200)
+
+
+@app.get("/admin/jobs/{job_def_id}/runs")
+async def job_runs(job_def_id: str, request: Request) -> Response:
+    """This definition's runs, newest first.
+
+    404s for an unknown definition rather than answering with an empty list: a
+    definition that does not exist and one that has never run are different
+    facts, and an empty history is a perfectly ordinary state for a new job.
+    """
+    refused = _admin_or_404(request)
+    if refused is not None:
+        return refused
+
+    store = _store(request)
+    if store.job_def(job_def_id) is None:
+        return JSONResponse({"detail": "no such job"}, status_code=404)
+
+    runs = store.runs_for_job_def(job_def_id, limit=50)
+    return JSONResponse({"count": len(runs), "runs": runs})
 
 
 @app.delete("/admin/jobs/{job_def_id}")

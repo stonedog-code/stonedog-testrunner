@@ -51,6 +51,10 @@ CREATE TABLE IF NOT EXISTS runners (
 
 CREATE TABLE IF NOT EXISTS jobs (
     id            TEXT PRIMARY KEY,
+    -- Which DEFINITION produced this run, when one did. Nullable on purpose:
+    -- runs recorded before definitions existed have none, and no foreign key,
+    -- because deleting a definition must not erase the record of what it did.
+    job_def_id    TEXT,
     product       TEXT NOT NULL,
     server        TEXT NOT NULL,
     select_expr   TEXT,
@@ -111,11 +115,15 @@ CREATE UNIQUE INDEX IF NOT EXISTS job_defs_trigger
 #: doing it here means an operator upgrading the edge does not have to know.
 _MIGRATIONS = (
     ("jobs", "dispatch_mode", "ALTER TABLE jobs ADD COLUMN dispatch_mode TEXT NOT NULL DEFAULT ''"),
+    # Nullable and with no default, so every row written before definitions
+    # existed keeps its history and reads back as "no definition" rather than
+    # as belonging to one (NEH-1167).
+    ("jobs", "job_def_id", "ALTER TABLE jobs ADD COLUMN job_def_id TEXT"),
 )
 
 _JOB_COLUMNS = (
     "id, product, server, select_expr, marker, slack_channel, slack_user, "
-    "created_at, state, dispatch_mode"
+    "created_at, state, dispatch_mode, job_def_id"
 )
 
 
@@ -338,9 +346,10 @@ class SqliteStore(JobStore):
             # was a real defect.
             cur = conn.execute(
                 f"INSERT OR IGNORE INTO jobs ({_JOB_COLUMNS}, started_at) "
-                f"VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                f"VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                 (job.id, job.product, job.server, job.select_expr, job.marker,
-                 job.slack_channel, job.slack_user, now, state, mode, started),
+                 job.slack_channel, job.slack_user, now, state, mode,
+                 job.job_def_id, started),
             )
             return EnqueueResult.ACCEPTED if cur.rowcount == 1 else EnqueueResult.DUPLICATE
 
@@ -492,6 +501,14 @@ class SqliteStore(JobStore):
         with self._conn() as conn:
             rows = conn.execute(
                 "SELECT * FROM jobs ORDER BY created_at DESC LIMIT ?", (limit,)
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def runs_for_job_def(self, job_def_id: str, limit: int = 20) -> list[dict[str, Any]]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM jobs WHERE job_def_id = ? ORDER BY created_at DESC LIMIT ?",
+                (job_def_id, limit),
             ).fetchall()
         return [dict(r) for r in rows]
 

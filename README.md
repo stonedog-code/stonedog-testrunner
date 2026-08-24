@@ -503,6 +503,16 @@ Checked, not assumed:
 - **Non-vacuity, V1/V2:** three vulnerabilities were planted — always-true
   signature, removed replay window, unrestricted product — and each was caught
   by the suite; green again after restore.
+- **Non-vacuity, the run → definition link (NEH-1167):** five plants, each
+  restored — history matching on nothing instead of the definition (the WRONG
+  answer this exists to prevent, planted on both backends), history returned
+  oldest-first, an unknown definition answering with an empty history instead
+  of 404, and the edge no longer setting the link at all.
+- **The last of those was MISSED at first, and that was the point.** Every
+  store test proves the column can HOLD a definition id; none of them says the
+  edge SETS one, so planting `job_def_id=None` in the command handler passed
+  the whole conformance tier. It took an integration test reading the history
+  back through the admin API — the path the tab uses — to catch it.
 - **Non-vacuity, `not_dispatched` (NEH-1156):** four plants, each restored —
   the edge no longer recording a failed dispatch (the original defect); a
   never-started run reported as an ordinary queued one; the `runner_id IS NULL`

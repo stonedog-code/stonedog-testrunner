@@ -39,6 +39,7 @@ from pathlib import Path
 import pytest
 from slack_runtests.store import JobDef, open_store
 from harness import (
+    TEST_ADMIN_TOKEN,
     TEST_CHANNEL_ID,
     TEST_PRODUCTS,
     TEST_SERVERS,
@@ -163,7 +164,13 @@ def edge(tmp_path_factory: pytest.TempPathFactory):
         # configuration nobody deploys, and would hide a regression that made
         # the token the only working route.
         "RUNNER_ENROLL_TOKEN": "",
-        "EDGE_ADMIN_TOKEN": "",
+        # The ADMIN token IS set, unlike the enrol token above. They are
+        # different credentials with different reasoning: the enrol token stays
+        # empty because production pre-authorises keys instead, whereas an admin
+        # token is exactly what a deployment running the tab has — and without
+        # one the whole job API 404s, so the history a command produces could
+        # not be read back.
+        "EDGE_ADMIN_TOKEN": TEST_ADMIN_TOKEN,
         # The claim endpoint is a LONG POLL: with nothing to hand out it holds
         # the request open for `EDGE_POLL_TIMEOUT` seconds before answering 204.
         # The 25s default is right for a deployment (under a proxy's idle

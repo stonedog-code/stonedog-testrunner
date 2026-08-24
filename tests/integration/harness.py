@@ -46,6 +46,7 @@ TEST_CHANNEL_ID = "C_INTEGRATION"
 # for a reason worth keeping: a test that imports the allowlist and then asserts
 # the allowlist accepts it cannot fail. Here the values come from the fixture on
 # disk instead, which is a real constraint rather than a restatement.
+TEST_ADMIN_TOKEN = "integration-admin-token"
 TEST_PRODUCTS = "webapp,billing,catalog"
 TEST_SERVERS = "staging,dev,local"
 TEST_TEST_SCOPES = "smoke"

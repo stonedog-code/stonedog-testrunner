@@ -108,10 +108,10 @@ def store(request: pytest.FixtureRequest, tmp_path) -> JobStore:
 @pytest.fixture
 def make_job():
     def _make(job_id: str = "job-1", product: str = "webapp", server: str = "staging",
-              channel: str = "#testing") -> Job:
+              channel: str = "#testing", job_def_id: str | None = None) -> Job:
         return Job(
             id=job_id, product=product, server=server, select_expr=None, marker=None,
-            slack_channel=channel, slack_user="U1",
+            slack_channel=channel, slack_user="U1", job_def_id=job_def_id,
         )
 
     return _make
