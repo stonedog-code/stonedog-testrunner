@@ -99,6 +99,9 @@ SLACK_SIGNING_SECRET=$SECRET
 SLACK_TEAM_ID=$TEAM
 RUNTESTS_CHANNELS=$CHANNEL
 RUNTESTS_USERS=
+RUNTESTS_PRODUCTS=webapp,billing
+RUNTESTS_SERVERS=staging,dev
+RUNTESTS_TEST_SCOPES=smoke,full
 EDGE_ADMIN_TOKEN=
 ENV
 compose standalone up -d --wait --wait-timeout 120 >/dev/null 2>&1 || true
@@ -134,6 +137,9 @@ SLACK_SIGNING_SECRET=$SECRET
 SLACK_TEAM_ID=$TEAM
 RUNTESTS_CHANNELS=$CHANNEL
 RUNTESTS_USERS=
+RUNTESTS_PRODUCTS=webapp,billing
+RUNTESTS_SERVERS=staging,dev
+RUNTESTS_TEST_SCOPES=smoke,full
 POSTGRES_USER=testrunner
 POSTGRES_PASSWORD=$PG_PASSWORD_RAW
 EDGE_DB_PASSWORD_ENCODED=$PG_PASSWORD_ENCODED
@@ -163,7 +169,7 @@ contains 'it is reachable only through the app in front' '"ok"' "$proxied_health
 
 # ── the check this script exists for ────────────────────────────────────────
 printf '== the raw-body signature must survive the proxy ==\n'
-BODY='team_id=T_VERIFY&channel_id=C_VERIFY&channel_name=testing&user_id=U_VERIFY&command=%2Fruntests&text=-p+webapp&trigger_id=verify-trigger-1'
+BODY='team_id=T_VERIFY&channel_id=C_VERIFY&channel_name=testing&user_id=U_VERIFY&command=%2Fruntests&text=-p+webapp+-s+staging+--test_scope+smoke&trigger_id=verify-trigger-1'
 TS="$(date +%s)"
 SIG="v0=$(printf 'v0:%s:%s' "$TS" "$BODY" \
   | openssl dgst -sha256 -hmac "$SECRET" -r | cut -d' ' -f1)"

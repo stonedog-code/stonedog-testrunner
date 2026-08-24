@@ -39,8 +39,11 @@ from pathlib import Path
 import pytest
 from harness import (
     TEST_CHANNEL_ID,
+    TEST_PRODUCTS,
+    TEST_SERVERS,
     TEST_SIGNING_SECRET,
     TEST_TEAM_ID,
+    TEST_TEST_SCOPES,
     TEST_USER_ID,
     EdgeUnderTest,
 )
@@ -116,6 +119,9 @@ def edge(tmp_path_factory: pytest.TempPathFactory):
         "SLACK_TEAM_ID": TEST_TEAM_ID,
         "RUNTESTS_CHANNELS": TEST_CHANNEL_ID,
         "RUNTESTS_USERS": TEST_USER_ID,
+        "RUNTESTS_PRODUCTS": TEST_PRODUCTS,
+        "RUNTESTS_SERVERS": TEST_SERVERS,
+        "RUNTESTS_TEST_SCOPES": TEST_TEST_SCOPES,
         "EDGE_DB_PATH": str(workdir / "edge.db"),
         "EDGE_KEY_PATH": str(workdir / "edge_ed25519.pem"),
         "EDGE_TRUSTED_KEYS_DIR": str(trusted_keys_dir),

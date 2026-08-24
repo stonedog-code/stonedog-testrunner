@@ -23,6 +23,7 @@ from fastapi.responses import JSONResponse
 
 from . import gate
 from .authz import refuse_or_warn
+from .parsing import Grammar
 from stonedog_logs import configure as configure_logging
 from .config import Config, load
 from .runners import github as github_runner
@@ -63,6 +64,9 @@ async def _startup_gate(app: FastAPI):
         allowed_team=cfg.allowed_team,
         allowed_channels=cfg.allowed_channels,
         allowed_users=cfg.allowed_users,
+        allowed_products=cfg.allowed_products,
+        allowed_servers=cfg.allowed_servers,
+        allowed_test_scopes=cfg.allowed_test_scopes,
     )
     if refusal is not None:
         # LOGGED, then raised with one line. Raising the whole block gets it
@@ -149,6 +153,9 @@ async def commands(request: Request, background: BackgroundTasks) -> JSONRespons
         allowed_team=cfg.allowed_team,
         allowed_channels=cfg.allowed_channels,
         allowed_users=cfg.allowed_users,
+        grammar=Grammar.of(
+            cfg.allowed_products, cfg.allowed_servers, cfg.allowed_test_scopes
+        ),
     )
     if not outcome.ok:
         if outcome.status != 200:

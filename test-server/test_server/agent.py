@@ -19,6 +19,7 @@ makes the three-server harness prove anything about queueing.
 from __future__ import annotations
 
 import logging
+from typing import Iterable
 import subprocess
 import shutil
 import sys
@@ -29,7 +30,7 @@ from pathlib import Path
 
 from slack_runtests import identity
 from slack_runtests.slack import announce_configuration
-from slack_runtests.parsing import EXPRESSION, PRODUCTS, SERVERS
+from slack_runtests.parsing import EXPRESSION
 
 from .client import EdgeClient, EdgeError
 from .config import RunnerConfig, load
@@ -59,7 +60,13 @@ def build_argv(product: str, server: str, select: str, marker: str,
     return argv
 
 
-def validate(job: dict) -> str | None:
+def validate(
+    job: dict,
+    *,
+    allowed_products: Iterable[str],
+    allowed_servers: Iterable[str],
+    allowed_test_scopes: Iterable[str] = (),
+) -> str | None:
     """Re-check the job against the same allowlists the edge used.
 
     A signature proves WHO sent a job, not that its contents are sane. If the
@@ -67,10 +74,18 @@ def validate(job: dict) -> str | None:
     that skips a check, this is what stands between a job payload and a
     subprocess on an internal machine. Returns an error string, or None.
     """
-    if job.get("product") not in PRODUCTS:
+    # An EMPTY allowlist refuses everything here, rather than allowing it.
+    # `x not in frozenset()` is True, so this falls the safe way by construction
+    # -- but it is worth saying out loud, because the opposite reading ("no
+    # allowlist configured, so no restriction") is exactly the bug NEH-1119
+    # fixed one layer up and NEH-1139 fixed here.
+    if job.get("product") not in frozenset(allowed_products):
         return f"product {job.get('product')!r} is not on the allowlist"
-    if job.get("server") not in SERVERS:
+    if job.get("server") not in frozenset(allowed_servers):
         return f"server {job.get('server')!r} is not on the allowlist"
+    scopes = frozenset(allowed_test_scopes)
+    if scopes and job.get("test_scope") is not None and job.get("test_scope") not in scopes:
+        return f"test_scope {job.get('test_scope')!r} is not on the allowlist"
     for field in ("select", "marker"):
         value = job.get(field) or ""
         if value and not EXPRESSION.match(value):
@@ -126,7 +141,12 @@ def execute(cfg: RunnerConfig, client: EdgeClient, job: dict) -> None:
     reporter = JobReporter(str(job.get("slack_channel") or ""), cfg.runner_id)
     reporter.received(job)
 
-    problem = validate(job)
+    problem = validate(
+        job,
+        allowed_products=cfg.allowed_products,
+        allowed_servers=cfg.allowed_servers,
+        allowed_test_scopes=cfg.allowed_test_scopes,
+    )
     if problem is not None:
         log.error("refused job %s: %s", job_id, problem)
         reporter.completed(job, exit_code=4, duration=0.0)

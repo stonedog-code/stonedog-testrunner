@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # test.sh — POST to the locally running server to start a test run.
 #
-#     bash test.sh                              # /runtests -p webapp -s staging
+#     bash test.sh                              # /runtests -p webapp -s staging --test_scope smoke
 #     bash test.sh -- -p webapp -k smoke        # pass your own flags
 #     bash test.sh --results                    # ask for the last run
 #     bash test.sh --bad                        # a rejected command, to see the error
@@ -34,7 +34,7 @@ CHANNEL_ID="${SLACK_CHANNEL_ID:-C0123456789}"
 CHANNEL_NAME="${SLACK_CHANNEL_NAME:-#testing}"
 USER_ID="${SLACK_USER_ID:-U0123456789}"
 
-COMMAND_TEXT="-p webapp -s staging"
+COMMAND_TEXT="-p webapp -s staging --test_scope smoke"
 SIGN=1
 
 while [ $# -gt 0 ]; do

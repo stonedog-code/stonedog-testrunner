@@ -31,7 +31,23 @@ pytestmark = pytest.mark.integration
 #: the control — because a gate that refuses every start is not a gate, and
 #: nothing in the refusal cases alone could tell the difference.
 PROTECTIONS = ("SLACK_SIGNING_SECRET", "SLACK_TEAM_ID", "RUNTESTS_CHANNELS",
-               "RUNTESTS_USERS", "RUNTESTS_INSECURE_DEV")
+               "RUNTESTS_USERS", "RUNTESTS_INSECURE_DEV",
+               # NEH-1139: the trigger allowlists refuse startup too, so they
+               # must be STRIPPED for the refusal cases as well. Left in the
+               # ambient environment they would make a "nothing configured"
+               # launch partly configured, and the refusal count would depend on
+               # whoever ran the suite.
+               "RUNTESTS_PRODUCTS", "RUNTESTS_SERVERS", "RUNTESTS_TEST_SCOPES")
+
+#: The full set a control needs, since "configured" now means six things.
+CONFIGURED_ENV = {
+    "SLACK_SIGNING_SECRET": "s3cr3t",
+    "SLACK_TEAM_ID": "T_ALLOWED",
+    "RUNTESTS_CHANNELS": "C_ALLOWED",
+    "RUNTESTS_PRODUCTS": "alpha,beta",
+    "RUNTESTS_SERVERS": "sandbox",
+    "RUNTESTS_TEST_SCOPES": "smoke",
+}
 
 APPS = [
     pytest.param("edge_server.app:app", id="edge"),
@@ -119,7 +135,8 @@ def test_a_bare_uvicorn_launch_cannot_go_around_the_gate(app: str, tmp_path) -> 
     assert STARTED not in output, "it must not have opened a socket first"
     # Every missing protection is named. A refusal saying only "misconfigured"
     # costs an operator three restarts to learn three things.
-    for name in ("SLACK_SIGNING_SECRET", "SLACK_TEAM_ID", "RUNTESTS_CHANNELS"):
+    for name in ("SLACK_SIGNING_SECRET", "SLACK_TEAM_ID", "RUNTESTS_CHANNELS",
+                 "RUNTESTS_PRODUCTS", "RUNTESTS_SERVERS", "RUNTESTS_TEST_SCOPES"):
         assert name in output
 
 
@@ -127,11 +144,7 @@ def test_a_bare_uvicorn_launch_cannot_go_around_the_gate(app: str, tmp_path) -> 
 def test_a_configured_launch_starts(app: str, tmp_path) -> None:
     """The control. Without it every assertion above is equally satisfied by an
     app that refuses to start under any circumstances whatsoever."""
-    output = _launch(app, {
-        "SLACK_SIGNING_SECRET": "s3cr3t",
-        "SLACK_TEAM_ID": "T_ALLOWED",
-        "RUNTESTS_CHANNELS": "C_ALLOWED",
-    }, tmp_path, until=STARTED)
+    output = _launch(app, dict(CONFIGURED_ENV), tmp_path, until=STARTED)
 
     assert "REFUSING TO START" not in output, output[-2000:]
     assert STARTED in output, output[-2000:]
@@ -143,7 +156,8 @@ def test_the_opt_out_starts_it_and_names_what_it_ignored(app: str, tmp_path) -> 
 
     assert STARTED in output, output[-2000:]
     assert "NOT PROTECTING ANYTHING" in output, output[-2000:]
-    for name in ("SLACK_SIGNING_SECRET", "SLACK_TEAM_ID", "RUNTESTS_CHANNELS"):
+    for name in ("SLACK_SIGNING_SECRET", "SLACK_TEAM_ID", "RUNTESTS_CHANNELS",
+                 "RUNTESTS_PRODUCTS", "RUNTESTS_SERVERS", "RUNTESTS_TEST_SCOPES"):
         assert name in output
 
 
@@ -223,11 +237,7 @@ def test_run_sh_still_works_on_a_fresh_checkout(tmp_path) -> None:
 
 
 def test_run_sh_leaves_a_fully_configured_start_alone(tmp_path) -> None:
-    _, output = _run_sh({
-        "SLACK_SIGNING_SECRET": "s3cr3t",
-        "SLACK_TEAM_ID": "T_ALLOWED",
-        "RUNTESTS_CHANNELS": "C_ALLOWED",
-    }, tmp_path, until=STARTED)
+    _, output = _run_sh(dict(CONFIGURED_ENV), tmp_path, until=STARTED)
 
     assert STARTED in output, output[-2000:]
     assert "NOT PROTECTING ANYTHING" not in output
@@ -250,13 +260,13 @@ def test_run_sh_leaves_a_fully_configured_start_alone(tmp_path) -> None:
 @pytest.mark.parametrize("app", APPS)
 def test_an_unreachable_store_refuses_to_start(app: str, tmp_path) -> None:
     dsn = "postgresql://nobody:nothing@127.0.0.1:1/nonexistent?connect_timeout=2"
-    output = _launch(app, {
-        "SLACK_SIGNING_SECRET": "s3cr3t",
-        "SLACK_TEAM_ID": "T_ALLOWED",
-        "RUNTESTS_CHANNELS": "C_ALLOWED",
-        "EDGE_DB_DSN": dsn,
-        "RUNTESTS_DB_DSN": dsn,
-    }, tmp_path, until=REFUSED, expect_exit=True, deadline=90)
+    # Fully configured on purpose: this test is about the STORE being
+    # unreachable, so every other refusal must be satisfied or it passes for the
+    # wrong reason -- and its assertion would then be about a message it never
+    # reached.
+    output = _launch(app, {**CONFIGURED_ENV, "EDGE_DB_DSN": dsn,
+                           "RUNTESTS_DB_DSN": dsn},
+                     tmp_path, until=REFUSED, expect_exit=True, deadline=90)
 
     assert REFUSED in output, output[-2000:]
     assert STARTED not in output, "it must not have opened a socket first"
@@ -271,10 +281,6 @@ def test_the_store_that_was_OPENED_is_the_one_reported(app: str, tmp_path) -> No
     something was actually opened, and only the second is what the deployment
     scripts assert.
     """
-    output = _launch(app, {
-        "SLACK_SIGNING_SECRET": "s3cr3t",
-        "SLACK_TEAM_ID": "T_ALLOWED",
-        "RUNTESTS_CHANNELS": "C_ALLOWED",
-    }, tmp_path, until=STARTED)
+    output = _launch(app, dict(CONFIGURED_ENV), tmp_path, until=STARTED)
 
     assert "store ready: sqlite" in output, output[-2000:]

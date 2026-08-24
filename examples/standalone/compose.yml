@@ -48,6 +48,12 @@ services:
       SLACK_TEAM_ID: "${SLACK_TEAM_ID:?set this in .env}"
       RUNTESTS_CHANNELS: "${RUNTESTS_CHANNELS:-}"
       RUNTESTS_USERS: "${RUNTESTS_USERS:-}"
+      # Required -- the edge refuses to start without them. `:?` rather than
+      # `:-` on purpose: an unset allowlist must stop the stack here with a
+      # readable message, not start a container that refuses and restart-loops.
+      RUNTESTS_PRODUCTS: "${RUNTESTS_PRODUCTS:?set this in .env}"
+      RUNTESTS_SERVERS: "${RUNTESTS_SERVERS:?set this in .env}"
+      RUNTESTS_TEST_SCOPES: "${RUNTESTS_TEST_SCOPES:?set this in .env}"
 
       # ── the store ─────────────────────────────────────────────────────────
       # SQLite on a volume, which is right here: this container HAS a durable

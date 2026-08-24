@@ -53,6 +53,9 @@ else.
 | `SLACK_TEAM_ID` | *(empty)* | **Required.** Pin the workspace. A valid Slack signature only proves the request came from *Slack* — this is what proves it came from *your* Slack. |
 | `RUNTESTS_CHANNELS` | *(empty)* | Comma-separated channel ids allowed to run tests. **One of this or `RUNTESTS_USERS` is required.** |
 | `RUNTESTS_USERS` | *(empty)* | Comma-separated user ids allowed to run tests. |
+| `RUNTESTS_PRODUCTS` | *(empty)* | **Required.** Comma-separated allowlist of products that may ever be tested. Interpolated into a suite path, so this is what stops `../../etc`. |
+| `RUNTESTS_SERVERS` | *(empty)* | **Required.** Comma-separated allowlist of environments. The boundary that keeps a production host from being nameable in a chat box — so do not put one here. |
+| `RUNTESTS_TEST_SCOPES` | *(empty)* | **Required.** Comma-separated allowlist of test scopes (`smoke`, `full`, …). The third token of a trigger. |
 | `SLACK_DEFAULT_CHANNEL` | `#testing` | Where results go if the payload carries no channel. |
 | `RUNTESTS_INSECURE_DEV` | *(empty)* | Start anyway with all of the above absent. **Local development only.** Warns, on every start, naming each protection it is ignoring. |
 

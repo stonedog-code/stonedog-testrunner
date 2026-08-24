@@ -14,6 +14,23 @@ def _csv(name: str, default: str = "") -> frozenset[str]:
     return frozenset(part.strip() for part in raw.split(",") if part.strip())
 
 
+def _pairs(name: str) -> dict[str, str]:
+    """`a=1,b=2` into a dict.
+
+    A malformed entry is SKIPPED rather than raising, and rather than being
+    treated as a key with an empty value. This map only ever narrows behaviour --
+    a missing entry falls back to GITHUB_REPO -- so a typo costs a wrong
+    repository at dispatch time, which fails loudly, whereas raising here would
+    take down a process over a stray comma.
+    """
+    out: dict[str, str] = {}
+    for part in os.environ.get(name, "").split(","):
+        key, sep, value = part.partition("=")
+        if sep and key.strip() and value.strip():
+            out[key.strip()] = value.strip()
+    return out
+
+
 def _num(name: str, default: float) -> float:
     try:
         return float(os.environ.get(name, "") or default)
@@ -45,6 +62,30 @@ class Config:
     )
     allowed_users: frozenset[str] = field(default_factory=lambda: _csv("RUNTESTS_USERS"))
 
+    # ── the trigger allowlists (PRD §4.1, A2.10) ─────────────────────────────
+    # Which products, environments and test scopes may EVER be named. These are
+    # the security boundary; a job (landing next) is a routing decision on top
+    # of them and may only name values already here. The enumerations are never
+    # derived from the job list -- deriving them would let adding a job widen
+    # the boundary.
+    #
+    # All three refuse startup when unset. An empty allowlist must never mean
+    # "allow everything": that is the green-over-an-empty-set rule applied to an
+    # authorisation boundary, and a config that silently permits every product
+    # is worse than no config.
+    #
+    # They were tuples in parsing.py until NEH-1139, which meant no other
+    # organisation could use this without editing Python.
+    allowed_products: frozenset[str] = field(
+        default_factory=lambda: _csv("RUNTESTS_PRODUCTS")
+    )
+    allowed_servers: frozenset[str] = field(
+        default_factory=lambda: _csv("RUNTESTS_SERVERS")
+    )
+    allowed_test_scopes: frozenset[str] = field(
+        default_factory=lambda: _csv("RUNTESTS_TEST_SCOPES")
+    )
+
     # ── V1: local execution ──────────────────────────────────────────────────
     suite_root: str = field(
         default_factory=lambda: os.environ.get("RUNTESTS_SUITE_ROOT", "tests/sample")
@@ -57,6 +98,19 @@ class Config:
     )
     github_ref: str = field(default_factory=lambda: os.environ.get("GITHUB_REF_NAME", "main"))
     github_token: str = field(default_factory=lambda: os.environ.get("GITHUB_TOKEN", ""))
+
+    #: `product=owner/repo` pairs, comma-separated. Optional: a product with no
+    #: entry falls back to `GITHUB_REPO`, which is what every deployment
+    #: configured before this existed already sets. That fallback is the
+    #: backward compatibility A2.10 requires -- an upgrade must not hard-crash a
+    #: deployment that only ever knew the flat form.
+    product_repos: dict[str, str] = field(
+        default_factory=lambda: _pairs("RUNTESTS_PRODUCT_REPOS")
+    )
+
+    def repo_for(self, product: str) -> str:
+        """The repository to dispatch `product` to, or the flat default."""
+        return self.product_repos.get(product) or self.github_repo
 
     # ── the store ────────────────────────────────────────────────────────────
     # V1 and V2 record what they dispatched so a Slack retry cannot start a

@@ -65,6 +65,9 @@ def missing_protections(
     allowed_team: str,
     allowed_channels: Iterable[str],
     allowed_users: Iterable[str],
+    allowed_products: Iterable[str] = (),
+    allowed_servers: Iterable[str] = (),
+    allowed_test_scopes: Iterable[str] = (),
 ) -> list[str]:
     """Everything that must be configured before this may face the internet.
 
@@ -101,11 +104,37 @@ def missing_protections(
             "contractors and Slack Connect users from a customer"
         )
 
+    # ── the trigger allowlists (PRD §4.1) ────────────────────────────────────
+    # A different KIND of check from the three above: those answer "is this
+    # caller allowed", these answer "may this value ever be named". They belong
+    # here anyway, because the failure is identical -- a process facing the
+    # internet that protects less than its operator believes.
+    #
+    # Named one per line rather than as a single "allowlists" entry, because an
+    # operator who set two of the three would otherwise be told nothing about
+    # which one they missed.
+    for label, values, why in (
+        ("RUNTESTS_PRODUCTS", allowed_products,
+         "which products may be tested; unset would mean any string a caller "
+         "sends is interpolated into a suite path"),
+        ("RUNTESTS_SERVERS", allowed_servers,
+         "which environments may be targeted; this is the boundary that keeps "
+         "a production host from being named in a chat box"),
+        ("RUNTESTS_TEST_SCOPES", allowed_test_scopes,
+         "which test scopes may be requested; the third token of a trigger, "
+         "and unguarded it is the one an attacker would reach for"),
+    ):
+        if not list(values):
+            missing.append(f"{label} — {why}")
+
     return missing
 
 
 def refuse_or_warn(log: logging.Logger, *, signing_secret: str, allowed_team: str,
                    allowed_channels: Iterable[str], allowed_users: Iterable[str],
+                   allowed_products: Iterable[str] = (),
+                   allowed_servers: Iterable[str] = (),
+                   allowed_test_scopes: Iterable[str] = (),
                    environ: dict[str, str] | None = None,
                    warn: bool = True) -> str | None:
     """Called once at startup. Returns a refusal message, or None to proceed.
@@ -125,6 +154,9 @@ def refuse_or_warn(log: logging.Logger, *, signing_secret: str, allowed_team: st
         allowed_team=allowed_team,
         allowed_channels=allowed_channels,
         allowed_users=allowed_users,
+        allowed_products=allowed_products,
+        allowed_servers=allowed_servers,
+        allowed_test_scopes=allowed_test_scopes,
     )
 
     if not missing:

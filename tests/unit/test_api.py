@@ -20,7 +20,7 @@ pytestmark = pytest.mark.unit
 SECRET = "test-signing-secret"
 
 
-def form_body(text: str = "-p webapp", **overrides: str) -> str:
+def form_body(text: str = "-p alpha", **overrides: str) -> str:
     fields = {
         "team_id": "T_ALLOWED",
         "channel_id": "C_ALLOWED",
@@ -49,6 +49,11 @@ def client(monkeypatch: pytest.MonkeyPatch, tmp_path) -> TestClient:
         allowed_team="T_ALLOWED",
         allowed_channels=frozenset({"C_ALLOWED"}),
         allowed_users=frozenset({"U_ALLOWED"}),
+        # NEH-1139: the trigger allowlists are configuration now. Fictional
+        # values, so this file cannot become a place house names live.
+        allowed_products=frozenset({"alpha", "beta"}),
+        allowed_servers=frozenset({"sandbox"}),
+        allowed_test_scopes=frozenset({"smoke"}),
         github_repo="",  # forces the dry-run path in the dispatcher
         github_token="",
     )
@@ -92,7 +97,7 @@ def test_a_signature_over_different_bytes_is_rejected(client: TestClient) -> Non
         "X-Slack-Signature": sign(body.encode(), ts, SECRET),
     }
     response = client.post(
-        "/slack/commands", content=form_body(text="-p billing"), headers=headers
+        "/slack/commands", content=form_body(text="-p beta"), headers=headers
     )
     assert response.status_code == 401
 
@@ -143,7 +148,7 @@ def test_a_different_trigger_id_does_start_a_second_run(client: TestClient) -> N
     # one run of a given (product, server) at a time, and this test is about the
     # idempotency key, not about the cap. The cap has its own tests.
     post(client, form_body())
-    post(client, form_body(text="-p billing", trigger_id="trigger-2"))
+    post(client, form_body(text="-p beta", trigger_id="trigger-2"))
     assert len(client.app.state.store.recent()) == 2
 
 
@@ -197,11 +202,11 @@ def test_a_channel_cannot_queue_past_its_limit(
 
 
 def test_results_reports_the_last_run(client: TestClient) -> None:
-    post(client, form_body(text="-p webapp"))
-    response = post(client, form_body(text="results -p webapp", trigger_id="t-results"))
-    assert "Last `webapp` run" in response.json()["text"]
+    post(client, form_body(text="-p alpha"))
+    response = post(client, form_body(text="results -p alpha", trigger_id="t-results"))
+    assert "Last `alpha` run" in response.json()["text"]
 
 
 def test_results_with_no_prior_run_says_so(client: TestClient) -> None:
-    response = post(client, form_body(text="results -p billing"))
+    response = post(client, form_body(text="results -p beta"))
     assert "No recorded run" in response.json()["text"]
