@@ -194,6 +194,154 @@ def validate_job(job: Job) -> None:
             raise StoreError(f"{name} is longer than {MAX_FIELD} characters")
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# JOB DEFINITIONS (PRD A2.2)
+#
+# A `Job` above is a RUN: one row per execution, with a state, a lease and an
+# attempt count. A `JobDef` here is a DEFINITION: a saved name, trigger and
+# action, which produces runs. Two different things, and the PRD calls both of
+# them "job".
+#
+# They are deliberately not named `Job` and `JobDefinition` in the schema. The
+# tables are `jobs` and `job_defs`, because `jobs` and `job_definitions` differ
+# by a suffix a hurried reader skips, and the two are joined in the same queries.
+#
+# THE RULE THAT SHAPES ALL OF THIS (A2.3):
+#
+#     A stored row is a REQUEST, never an AUTHORISATION.
+#
+# Nothing in this module decides that a job may run. The allowlists stay in
+# configuration (NEH-1139) and are re-checked at execution against whatever the
+# process is configured with NOW — a row that was valid when saved and is
+# invalid today is refused, because configuration drifts and the check that
+# matters is the one at use. So `save_job_def` validates SHAPE, and the
+# execution path validates AUTHORITY, and they are different functions on
+# purpose.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class ActionKind(str, Enum):
+    """What a job does when its trigger fires."""
+
+    #: Dispatch a workflow in an allowlisted repository. WHICH repo is
+    #: code/env; which workflow inside it may be a row (A2.3).
+    GH_ACTION = "gh-action"
+    #: Hand the job to an enrolled test server.
+    TEST_SERVER = "test-server"
+
+
+class SaveResult(Enum):
+    """Why a definition was or was not saved.
+
+    A bool cannot carry this, for the same reason `EnqueueResult` exists: a
+    duplicate trigger and a malformed row need different messages, and telling
+    somebody the wrong one sends them to edit the wrong field.
+    """
+
+    CREATED = "created"
+    UPDATED = "updated"
+    #: Another definition already claims this exact (product, test_scope,
+    #: server). A2.2.2 requires this be refused AT SAVE rather than resolved at
+    #: match time by whichever row was written last.
+    DUPLICATE_TRIGGER = "duplicate_trigger"
+
+
+@dataclass(frozen=True, slots=True)
+class JobDef:
+    id: str
+    name: str
+    product: str
+    test_scope: str
+    server: str
+    action_kind: str
+    action_target: str
+    description: str = ""
+    created_at: float = 0.0
+    updated_at: float = 0.0
+
+    @property
+    def trigger(self) -> tuple[str, str, str]:
+        """The full tuple a command must match. A2.2.2: exact, never partial."""
+        return (self.product, self.test_scope, self.server)
+
+    def trigger_text(self) -> str:
+        """The canonical command that fires this, in flag form.
+
+        Flags rather than positionals because this is what a person READS in a
+        definition, and the positional form is what they type (A2.2.1). One
+        grammar, two spellings; this is the spelling that says which is which.
+        """
+        return (f"runtests --product {self.product} "
+                f"--test_scope {self.test_scope} --server {self.server}")
+
+
+def validate_job_def(job_def: JobDef) -> None:
+    """Refuse a definition both backends would treat differently, or that is
+    structurally meaningless. Raises StoreError.
+
+    SHAPE ONLY — deliberately. Whether `product` is on the allowlist is an
+    authorisation question, and A2.3 puts that at execution time against live
+    configuration rather than here against whatever was true at save. Checking
+    it in this function too would look thorough and would be the beginning of
+    the store becoming the boundary.
+    """
+    if not job_def.id:
+        raise StoreError("a job definition needs an id")
+    if not job_def.name.strip():
+        raise StoreError("a job definition needs a name")
+
+    if job_def.action_kind not in {k.value for k in ActionKind}:
+        raise StoreError(
+            f"action_kind must be one of "
+            f"{', '.join(sorted(k.value for k in ActionKind))}, "
+            f"got {job_def.action_kind!r}"
+        )
+    if not job_def.action_target.strip():
+        raise StoreError("a job definition needs an action target")
+
+    for name, value in (
+        ("id", job_def.id),
+        ("name", job_def.name),
+        ("product", job_def.product),
+        ("test_scope", job_def.test_scope),
+        ("server", job_def.server),
+        ("action_target", job_def.action_target),
+        ("description", job_def.description),
+    ):
+        if len(value) > MAX_FIELD:
+            raise StoreError(f"{name} is longer than {MAX_FIELD} characters")
+
+    # Every trigger token is required. An empty one would make the tuple match
+    # a command that named nothing there, which is a partial match wearing an
+    # exact match's clothes.
+    for name in ("product", "test_scope", "server"):
+        if not getattr(job_def, name).strip():
+            raise StoreError(f"a job definition needs a {name}")
+
+
+def near_misses(
+    requested: tuple[str, str, str],
+    definitions: Iterable[JobDef],
+) -> list[JobDef]:
+    """Definitions differing from `requested` in exactly one trigger token.
+
+    A2.2.2: a command matching no job is refused WITH THE LIST OF WHAT WOULD
+    HAVE MATCHED. Silently ignoring it reads to the user as the bot being down,
+    and "no such job" with no further help reads as the job having been deleted.
+
+    One token, not two: a definition differing in all three is not a near miss,
+    it is a different job, and listing every definition as a suggestion is the
+    same as listing none.
+
+    Sorted by name so the same mistake produces the same message twice running.
+    """
+    out = [
+        d for d in definitions
+        if sum(1 for a, b in zip(requested, d.trigger) if a != b) == 1
+    ]
+    return sorted(out, key=lambda d: d.name)
+
+
 def validate_runner(runner_id: str, public_key: str) -> None:
     if not runner_id or len(runner_id) > MAX_FIELD:
         raise StoreError(f"runner_id must be 1..{MAX_FIELD} characters")
@@ -324,6 +472,55 @@ class JobStore(ABC):
 
     @abstractmethod
     def counts(self) -> dict[str, int]: ...
+
+    # ── job definitions (A2.2) ───────────────────────────────────────────────
+
+    @abstractmethod
+    def save_job_def(self, job_def: JobDef, *, now: float | None = None) -> SaveResult:
+        """Create or replace a definition, keyed by id.
+
+        Returns DUPLICATE_TRIGGER when another id already claims this exact
+        (product, test_scope, server).
+
+        THE REFUSAL MUST COME FROM A UNIQUE CONSTRAINT, NOT A PRIOR SELECT.
+        Two concurrent saves both pass a read-then-write check and both insert,
+        which is precisely the state A2.2.2 says must be impossible -- and it
+        would then be discovered at match time, by whichever row the database
+        felt like returning first.
+        """
+
+    @abstractmethod
+    def job_def(self, job_def_id: str) -> JobDef | None: ...
+
+    @abstractmethod
+    def job_def_for(self, product: str, test_scope: str, server: str) -> JobDef | None:
+        """The definition matching this EXACT tuple, or None.
+
+        Exact, never partial: a definition matching two of three tokens is a
+        different job, and returning it would run something nobody asked for.
+        """
+
+    @abstractmethod
+    def job_defs(self) -> list[JobDef]:
+        """Every definition, ordered by name so two listings agree."""
+
+    @abstractmethod
+    def delete_job_def(self, job_def_id: str) -> bool:
+        """True if a row was removed, False if there was nothing to remove.
+
+        The distinction matters to a caller reporting to a person: "deleted"
+        over an id that never existed is a lie that reads as success.
+        """
+
+    def count_job_defs(self) -> int:
+        """How many definitions exist.
+
+        Concrete rather than abstract: `job_defs()` already has to be right, and
+        a backend that got this wrong separately would be wrong in a way nothing
+        else notices. It exists at all because a startup line saying
+        `job definitions loaded` says the same thing over zero as over five.
+        """
+        return len(self.job_defs())
 
 
 __all__ = [

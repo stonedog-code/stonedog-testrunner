@@ -35,7 +35,7 @@ import uuid
 
 import pytest
 
-from slack_runtests.store import Job, JobStore, open_store
+from slack_runtests.store import Job, JobDef, JobStore, open_store
 from support import DSN_ENV, available_backends, postgres_dsn, required_backends
 
 #: The widest concurrency any test in this directory uses. The Postgres pool is
@@ -112,6 +112,28 @@ def make_job():
         return Job(
             id=job_id, product=product, server=server, select_expr=None, marker=None,
             slack_channel=channel, slack_user="U1",
+        )
+
+    return _make
+
+
+@pytest.fixture
+def make_job_def():
+    """A valid definition, varied by keyword.
+
+    Fictional vocabulary, like the unit tests: a fixture naming real products
+    would make it a claim about somebody's estate rather than about the store.
+    """
+    def _make(job_def_id: str = "jd-1", name: str = "alpha smoke",
+              product: str = "alpha", test_scope: str = "smoke",
+              server: str = "sandbox",
+              action_kind: str = "gh-action",
+              action_target: str = "alpha_smoke.yml",
+              description: str = "") -> JobDef:
+        return JobDef(
+            id=job_def_id, name=name, description=description, product=product,
+            test_scope=test_scope, server=server,
+            action_kind=action_kind, action_target=action_target,
         )
 
     return _make
