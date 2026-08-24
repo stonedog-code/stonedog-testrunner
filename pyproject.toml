@@ -10,6 +10,10 @@ dependencies = [
     "uvicorn>=0.52.4",
     "httpx>=0.28.0",
     "cryptography>=50.0.0",
+    # Structured logging. Adopted rather than hand-rolled: `logsetup.py` here
+    # was a worse version of `configure(only_if_unconfigured=True)`, written
+    # because the package could not do it at the time. It can now.
+    "stonedog-logs>=0.3.0",
 ]
 
 [project.optional-dependencies]
