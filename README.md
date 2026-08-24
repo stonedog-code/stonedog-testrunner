@@ -503,6 +503,12 @@ Checked, not assumed:
 - **Non-vacuity, V1/V2:** three vulnerabilities were planted — always-true
   signature, removed replay window, unrestricted product — and each was caught
   by the suite; green again after restore.
+- **Non-vacuity, the job API (NEH-1157):** five plants, each restored — the
+  admin token comparison always succeeding; an UNSET token opening the API
+  rather than closing it (`"" == ""`, the empty-allowlist bug applied to a
+  credential, and production has no token set today); the allowlist no longer
+  applied at save time; a SKIPPED workflow check reporting success; and the
+  list reporting a count of zero over a non-empty list.
 - **Non-vacuity, the gh-action path (NEH-1152):** five plants, each restored —
   the workflow-name guard removed (path traversal into another repository with
   our token); a command with no matching job queued anyway; the refusal no

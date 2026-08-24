@@ -33,6 +33,8 @@ import logging
 import time
 import uuid
 
+import httpx
+
 from contextlib import asynccontextmanager
 
 from fastapi import BackgroundTasks, FastAPI, Request
@@ -43,7 +45,8 @@ from slack_runtests.authz import refuse_or_warn
 from stonedog_logs import configure as configure_logging
 from slack_runtests.runners.github import dispatch_workflow
 from slack_runtests.store import (
-    ActionKind, EnqueueResult, Job, JobStore, StoreBusy, near_misses, open_store,
+    ActionKind, EnqueueResult, Job, JobDef, JobStore, SaveResult, StoreBusy,
+    StoreError, near_misses, open_store,
 )
 
 from . import auth
@@ -711,6 +714,211 @@ def _busy_response(request: Request) -> Response:
 
 
 # ── operator view ────────────────────────────────────────────────────────────
+
+# ── the job-definition API (PRD A2.4, NEH-1157) ──────────────────────────────
+#
+# The admin tab is AN API CLIENT OF THIS, not a second reader of these tables.
+# One source of truth for what a job is, and no Next.js app welded to a Python
+# project's schema -- so a column rename here is a deploy, not a two-repo
+# migration with a window where they disagree.
+
+
+def _admin_or_404(request: Request) -> Response | None:
+    """The `/admin/fleet` treatment, factored out. None means allowed.
+
+    404 rather than 401, and 404 rather than 403: an unauthenticated caller
+    learns only that there is nothing here. A job list names products, servers
+    and repositories, which is exactly the reconnaissance a public endpoint
+    should not confirm the existence of.
+    """
+    cfg = _config(request)
+    presented = request.headers.get("Authorization", "").removeprefix("Bearer ").strip()
+    if not cfg.admin_token or not identity_token_ok(presented, cfg.admin_token):
+        return JSONResponse({"detail": "Not Found"}, status_code=404)
+    return None
+
+
+def _job_def_json(job_def: JobDef) -> dict[str, Any]:
+    return {
+        "id": job_def.id,
+        "name": job_def.name,
+        "description": job_def.description,
+        "product": job_def.product,
+        "test_scope": job_def.test_scope,
+        "server": job_def.server,
+        "action_kind": job_def.action_kind,
+        "action_target": job_def.action_target,
+        "trigger": job_def.trigger_text(),
+        "created_at": job_def.created_at,
+        "updated_at": job_def.updated_at,
+    }
+
+
+def _outside_allowlist(cfg: EdgeConfig, product: str, test_scope: str, server: str) -> dict[str, Any] | None:
+    """Which trigger tokens this deployment does not permit, with what it does.
+
+    THE STORE DELIBERATELY DOES NOT CHECK THIS. A2.3: a stored row is a request,
+    never an authorisation, so `save_job_def` validates shape and nothing else --
+    and A2.10 keeps the allowlist as the boundary and the job as a routing
+    decision on top of it. This is the place a job naming a product nobody
+    allows gets refused.
+    """
+    grammar = cfg.grammar()
+    bad: dict[str, Any] = {}
+    for field, value, allowed in (
+        ("product", product, grammar.products),
+        ("test_scope", test_scope, grammar.test_scopes),
+        ("server", server, grammar.servers),
+    ):
+        if value not in allowed:
+            # The allowed values are NAMED. "not allowed" alone makes an admin
+            # guess, and the guess is usually a typo they cannot see.
+            bad[field] = {"got": value, "allowed": sorted(allowed)}
+    return bad or None
+
+
+async def _workflow_exists(cfg: EdgeConfig, repo: str, workflow: str) -> dict[str, Any]:
+    """A2.3.1 — check at SAVE time, so a typo fails while somebody is looking.
+
+    Returns a dict that ALWAYS says which of `checked` / `skipped` happened.
+    A bare pass here would be the green-over-an-empty-set failure with a form
+    around it: with no GITHUB_TOKEN this cannot check anything, and reporting
+    that as "fine" is how a job with a misspelt workflow reaches production and
+    fails hours later in front of colleagues.
+    """
+    if not (repo and cfg.github_token):
+        return {
+            "status": "skipped",
+            "reason": "no GITHUB_TOKEN or no repository configured for this product",
+        }
+    url = f"https://api.github.com/repos/{repo}/actions/workflows/{workflow}"
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            response = await client.get(url, headers={
+                "Authorization": f"Bearer {cfg.github_token}",
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+            })
+    except httpx.HTTPError as exc:
+        # Not a refusal. GitHub being unreachable is not evidence the workflow
+        # is wrong, and refusing the save would make an outage look like a typo.
+        log.warning("workflow check unreachable for %s/%s: %s", repo, workflow, exc)
+        return {"status": "skipped", "reason": "GitHub was unreachable"}
+
+    if response.status_code == 200:
+        return {"status": "checked", "exists": True}
+    if response.status_code == 404:
+        return {"status": "checked", "exists": False}
+    log.warning("workflow check got %s for %s/%s", response.status_code, repo, workflow)
+    return {"status": "skipped", "reason": f"GitHub answered {response.status_code}"}
+
+
+@app.get("/admin/jobs")
+async def list_jobs(request: Request) -> Response:
+    refused = _admin_or_404(request)
+    if refused is not None:
+        return refused
+    defs = _store(request).job_defs()
+    # THE COUNT, beside the list. A caller that mis-parses the body and finds
+    # nothing, and a deployment with no jobs, are otherwise the same answer.
+    return JSONResponse({"count": len(defs), "jobs": [_job_def_json(d) for d in defs]})
+
+
+@app.get("/admin/jobs/{job_def_id}")
+async def get_job(job_def_id: str, request: Request) -> Response:
+    refused = _admin_or_404(request)
+    if refused is not None:
+        return refused
+    found = _store(request).job_def(job_def_id)
+    if found is None:
+        return JSONResponse({"detail": "no such job"}, status_code=404)
+    return JSONResponse(_job_def_json(found))
+
+
+@app.put("/admin/jobs/{job_def_id}")
+async def put_job(job_def_id: str, request: Request) -> Response:
+    """Create or replace one definition.
+
+    The order of the checks is the design:
+      1. authorised            -> 404 if not
+      2. parseable             -> 400
+      3. inside the ALLOWLIST  -> 422, naming what is allowed        (A2.10)
+      4. well-SHAPED           -> 422, from the store's own validator
+      5. trigger not taken     -> 409, from the unique constraint    (A2.2.2)
+      6. workflow exists       -> reported, never silently assumed   (A2.3.1)
+
+    Steps 4 and 5 are the store's rules and are REPORTED here, not
+    re-implemented -- two copies of a uniqueness rule is one copy that drifts.
+    """
+    refused = _admin_or_404(request)
+    if refused is not None:
+        return refused
+
+    try:
+        body = await request.json()
+        if not isinstance(body, dict):
+            raise ValueError("not an object")
+    except Exception:
+        return JSONResponse({"detail": "body must be a JSON object"}, status_code=400)
+
+    cfg = _config(request)
+    product = str(body.get("product", ""))
+    test_scope = str(body.get("test_scope", ""))
+    server = str(body.get("server", ""))
+
+    outside = _outside_allowlist(cfg, product, test_scope, server)
+    if outside is not None:
+        return JSONResponse(
+            {"detail": "one or more values are not on this deployment's allowlist",
+             "fields": outside},
+            status_code=422,
+        )
+
+    job_def = JobDef(
+        id=job_def_id,
+        name=str(body.get("name", "")),
+        description=str(body.get("description", "")),
+        product=product,
+        test_scope=test_scope,
+        server=server,
+        action_kind=str(body.get("action_kind", "")),
+        action_target=str(body.get("action_target", "")),
+    )
+
+    store = _store(request)
+    try:
+        result = store.save_job_def(job_def)
+    except StoreError as exc:
+        return JSONResponse({"detail": str(exc)}, status_code=422)
+    except StoreBusy:
+        return JSONResponse({"detail": "the store is busy; try again"}, status_code=503)
+
+    if result is SaveResult.DUPLICATE_TRIGGER:
+        return JSONResponse(
+            {"detail": "another job already claims that trigger",
+             "trigger": job_def.trigger_text()},
+            status_code=409,
+        )
+
+    payload = {"result": result.value, "job": _job_def_json(store.job_def(job_def_id))}
+    if job_def.action_kind == ActionKind.GH_ACTION.value:
+        payload["workflow"] = await _workflow_exists(
+            cfg, cfg.repo_for(product), job_def.action_target
+        )
+    return JSONResponse(payload, status_code=201 if result is SaveResult.CREATED else 200)
+
+
+@app.delete("/admin/jobs/{job_def_id}")
+async def delete_job(job_def_id: str, request: Request) -> Response:
+    refused = _admin_or_404(request)
+    if refused is not None:
+        return refused
+    # `deleted: false` rather than a 404, because the caller asked for a state
+    # ("this job is gone") and that state now holds either way. The distinction
+    # is still reported, since "deleted" over an id that never existed is a lie
+    # that reads as success.
+    return JSONResponse({"deleted": _store(request).delete_job_def(job_def_id)})
+
 
 @app.get("/admin/fleet")
 async def fleet(request: Request) -> Response:

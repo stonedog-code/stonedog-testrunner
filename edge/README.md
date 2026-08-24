@@ -98,6 +98,54 @@ retries anything it has not heard back from in three seconds. The dispatch is
 *recorded first*: `job_id` comes from Slack's `trigger_id`, so a retry hits the
 primary key and is refused rather than running the suite twice.
 
+### Managing jobs — the admin API
+
+The admin tab is **a client of this**, never a second reader of the tables
+(A2.4): one source of truth for what a job is, and no Next.js app welded to a
+Python project's schema.
+
+```
+GET    /admin/jobs            list, with a count
+GET    /admin/jobs/{id}       one
+PUT    /admin/jobs/{id}       create or replace
+DELETE /admin/jobs/{id}       remove
+```
+
+**Default deny, answering 404** — not 401, not 403. An unauthenticated caller
+learns only that there is nothing here; a job list names products, servers and
+repositories, and confirming those exist is reconnaissance a public endpoint
+should not do. Set `EDGE_ADMIN_TOKEN` and present it as `Authorization: Bearer`.
+
+**With `EDGE_ADMIN_TOKEN` unset the API is closed, not open.** That is the
+empty-allowlist rule applied to a credential: `"" == ""` would make it public on
+every deployment that never set the variable.
+
+A save is refused, in this order, and each refusal is a different status:
+
+| | |
+|---|---|
+| **422** | a value outside the live allowlist — **and the response names what is allowed**, because "not allowed" alone makes an admin hunt for a typo they cannot see |
+| **422** | a malformed definition, from the store's own validator |
+| **409** | another job already claims that trigger (A2.2.2) |
+| **400** | a body that is not a JSON object |
+
+**The allowlist is checked HERE and deliberately not in the store.** A stored
+row is a request, never an authorisation (A2.3), so the store validates shape
+only — and if this route did not apply the allowlist, nothing would, and adding
+a job would widen the boundary.
+
+**A `gh-action` save reports whether the workflow was checked** (A2.3.1):
+
+```json
+{"result": "created", "workflow": {"status": "skipped", "reason": "no GITHUB_TOKEN…"}}
+```
+
+`checked` / `skipped`, never a bare pass. With no `GITHUB_TOKEN` nothing can be
+verified, and reporting that as fine is how a job with a misspelt workflow name
+reaches production and fails hours later in front of colleagues. A
+`test-server` save carries no `workflow` key at all — an absent check and a
+passed one must not look alike.
+
 ### Finding the values
 
 Three of the four are IDs rather than secrets, and the Slack UI is a poor place
