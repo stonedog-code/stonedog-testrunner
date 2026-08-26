@@ -129,11 +129,13 @@ def make_job_def():
               server: str = "sandbox",
               action_kind: str = "gh-action",
               action_target: str = "alpha_smoke.yml",
+              language: str = "python",
               description: str = "") -> JobDef:
         return JobDef(
             id=job_def_id, name=name, description=description, product=product,
             test_scope=test_scope, server=server,
             action_kind=action_kind, action_target=action_target,
+            language=language,
         )
 
     return _make

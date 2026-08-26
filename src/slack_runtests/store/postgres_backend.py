@@ -126,6 +126,7 @@ CREATE TABLE IF NOT EXISTS job_defs (
     server        TEXT NOT NULL,
     action_kind   TEXT NOT NULL,
     action_target TEXT NOT NULL,
+    language      TEXT NOT NULL,
     created_at    DOUBLE PRECISION NOT NULL,
     updated_at    DOUBLE PRECISION NOT NULL
 );
@@ -138,6 +139,12 @@ CREATE UNIQUE INDEX IF NOT EXISTS job_defs_trigger
 #: suite, which asserts both backends expose the same columns.
 _MIGRATIONS = (
     "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS dispatch_mode TEXT NOT NULL DEFAULT ''",
+    # NOT NULL with a default, for a table that was measured EMPTY in prod when
+    # this landed. The default exists so the ALTER succeeds on a pre-existing
+    # database at all -- it is not a claim that "python" is right for anybody's
+    # rows, because there were none. New rows always carry an explicit value:
+    # `_validate` refuses a definition whose language is not in the enum.
+    "ALTER TABLE job_defs ADD COLUMN IF NOT EXISTS language TEXT NOT NULL DEFAULT 'python'",
     # Nullable, so rows written before definitions existed keep their history.
     "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS job_def_id TEXT",
 )
@@ -552,8 +559,8 @@ class PostgresStore(JobStore):
                 cur.execute(
                     """INSERT INTO job_defs
                        (id, name, description, product, test_scope, server,
-                        action_kind, action_target, created_at, updated_at)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        action_kind, action_target, language, created_at, updated_at)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                        ON CONFLICT (id) DO UPDATE SET
                          name = EXCLUDED.name,
                          description = EXCLUDED.description,
@@ -562,10 +569,11 @@ class PostgresStore(JobStore):
                          server = EXCLUDED.server,
                          action_kind = EXCLUDED.action_kind,
                          action_target = EXCLUDED.action_target,
+                         language = EXCLUDED.language,
                          updated_at = EXCLUDED.updated_at""",
                     (job_def.id, job_def.name, job_def.description, job_def.product,
                      job_def.test_scope, job_def.server, job_def.action_kind,
-                     job_def.action_target, stamp, stamp),
+                     job_def.action_target, job_def.language, stamp, stamp),
                 )
             except Exception as exc:  # noqa: BLE001 - narrowed by SQLSTATE below
                 # Keyed on SQLSTATE 23505 (unique_violation) rather than on
@@ -624,6 +632,7 @@ def _job_def_from_row(row: Any) -> JobDef:
         id=row["id"], name=row["name"], description=row["description"],
         product=row["product"], test_scope=row["test_scope"], server=row["server"],
         action_kind=row["action_kind"], action_target=row["action_target"],
+        language=row["language"],
         created_at=row["created_at"], updated_at=row["updated_at"],
     )
 

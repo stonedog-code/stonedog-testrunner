@@ -102,6 +102,7 @@ CREATE TABLE IF NOT EXISTS job_defs (
     server        TEXT NOT NULL,
     action_kind   TEXT NOT NULL,
     action_target TEXT NOT NULL,
+    language      TEXT NOT NULL,
     created_at    REAL NOT NULL,
     updated_at    REAL NOT NULL
 );
@@ -115,6 +116,10 @@ CREATE UNIQUE INDEX IF NOT EXISTS job_defs_trigger
 #: doing it here means an operator upgrading the edge does not have to know.
 _MIGRATIONS = (
     ("jobs", "dispatch_mode", "ALTER TABLE jobs ADD COLUMN dispatch_mode TEXT NOT NULL DEFAULT ''"),
+    # Kept in step with the Postgres list by the conformance suite, which
+    # asserts both backends expose the same columns. See that file for why the
+    # default is a migration mechanic rather than a guess about real rows.
+    ("job_defs", "language", "ALTER TABLE job_defs ADD COLUMN language TEXT NOT NULL DEFAULT 'python'"),
     # Nullable and with no default, so every row written before definitions
     # existed keeps its history and reads back as "no definition" rather than
     # as belonging to one (NEH-1167).
@@ -544,8 +549,8 @@ class SqliteStore(JobStore):
                 conn.execute(
                     """INSERT INTO job_defs
                        (id, name, description, product, test_scope, server,
-                        action_kind, action_target, created_at, updated_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        action_kind, action_target, language, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                        ON CONFLICT(id) DO UPDATE SET
                          name = excluded.name,
                          description = excluded.description,
@@ -554,10 +559,11 @@ class SqliteStore(JobStore):
                          server = excluded.server,
                          action_kind = excluded.action_kind,
                          action_target = excluded.action_target,
+                         language = excluded.language,
                          updated_at = excluded.updated_at""",
                     (job_def.id, job_def.name, job_def.description, job_def.product,
                      job_def.test_scope, job_def.server, job_def.action_kind,
-                     job_def.action_target, stamp, stamp),
+                     job_def.action_target, job_def.language, stamp, stamp),
                 )
             except sqlite3.IntegrityError as exc:
                 # The UNIQUE index on (product, test_scope, server) fired, so
@@ -604,6 +610,7 @@ def _job_def_from_row(row: sqlite3.Row) -> JobDef:
         id=row["id"], name=row["name"], description=row["description"],
         product=row["product"], test_scope=row["test_scope"], server=row["server"],
         action_kind=row["action_kind"], action_target=row["action_target"],
+        language=row["language"],
         created_at=row["created_at"], updated_at=row["updated_at"],
     )
 

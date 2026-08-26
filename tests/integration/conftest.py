@@ -229,6 +229,7 @@ def edge(tmp_path_factory: pytest.TempPathFactory):
                             name=f"{product} {scope} on {server}",
                             product=product, test_scope=scope, server=server,
                             action_kind="test-server", action_target="any",
+                            language="python",
                         ))
             # ONE gh-action job, so the dispatch path is reachable. With no
             # GITHUB_TOKEN set the dispatch is a dry run that makes no HTTP
@@ -238,6 +239,7 @@ def edge(tmp_path_factory: pytest.TempPathFactory):
                     id=f"jd-gh-{n}", name=f"gh dispatch {n}",
                     product=product, test_scope="smoke", server=server,
                     action_kind="gh-action", action_target="runtests.yml",
+                    language="python",
                 ))
         finally:
             seed.close()

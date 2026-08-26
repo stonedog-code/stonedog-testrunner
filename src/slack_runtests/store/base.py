@@ -256,6 +256,49 @@ class ActionKind(str, Enum):
     TEST_SERVER = "test-server"
 
 
+class Language(str, Enum):
+    """What the suite under test is written in.
+
+    A CLOSED SET, and not free text, because this value chooses a workflow
+    FILENAME. Free text there is a path fragment an operator types, which is
+    the shape `RUNTESTS_PRODUCTS` exists to stop for products.
+
+    ## Why this is stored and NOT dispatched
+
+    `workflow_dispatch` accepts at most ten inputs and `runners/github.py`
+    already sends eight. Spending the ninth on something that only ever picks
+    between two workflow files buys nothing: the choice can be made here, at
+    save, where it is also checkable.
+
+    So `language` derives `action_target` and never leaves the edge. The
+    operator sets a language; the workflow that runs follows from it.
+    """
+
+    PYTHON = "python"
+    NODE = "node"
+
+
+#: The workflow each language runs, unless a definition overrides it.
+#:
+#: Two files rather than one taking a `language` input, deliberately. One
+#: workflow serving both needs `if:` around every setup, cache and install
+#: step, and the input budget above is genuinely tight.
+DEFAULT_WORKFLOW: dict[str, str] = {
+    Language.PYTHON.value: "runtests-python.yml",
+    Language.NODE.value: "runtests-node.yml",
+}
+
+
+def default_action_target(language: str) -> str:
+    """The workflow a language runs by default.
+
+    Returns "" for an unknown language rather than guessing. The caller is
+    validating anyway, and a guess here would hand a plausible filename to a
+    definition whose language was rejected a moment later.
+    """
+    return DEFAULT_WORKFLOW.get(language, "")
+
+
 class SaveResult(Enum):
     """Why a definition was or was not saved.
 
@@ -281,6 +324,16 @@ class JobDef:
     server: str
     action_kind: str
     action_target: str
+    #: Which suite runner this product uses. Chooses the workflow; never
+    #: dispatched. REQUIRED -- there is deliberately no default.
+    #:
+    #: A default would have to be a guess about somebody else's repository, and
+    #: the guess is free to make wrong because nothing downstream would notice:
+    #: a Node product defaulted to python dispatches a workflow that is simply
+    #: absent, which reports as a missing workflow rather than as a wrong
+    #: language. Measured before choosing: `job_defs` held ZERO rows in prod
+    #: when this landed, so requiring it backfills nothing.
+    language: str
     description: str = ""
     created_at: float = 0.0
     updated_at: float = 0.0
@@ -324,6 +377,13 @@ def validate_job_def(job_def: JobDef) -> None:
         )
     if not job_def.action_target.strip():
         raise StoreError("a job definition needs an action target")
+
+    if job_def.language not in {lang.value for lang in Language}:
+        raise StoreError(
+            f"language must be one of "
+            f"{', '.join(sorted(lang.value for lang in Language))}, "
+            f"got {job_def.language!r}"
+        )
 
     for name, value in (
         ("id", job_def.id),

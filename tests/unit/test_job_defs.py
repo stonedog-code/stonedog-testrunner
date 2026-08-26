@@ -12,7 +12,9 @@ import dataclasses
 
 import pytest
 
-from slack_runtests.store import ActionKind, JobDef, StoreError, near_misses, validate_job_def
+from slack_runtests.store import (
+    ActionKind, JobDef, Language, StoreError, near_misses, validate_job_def,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -22,6 +24,7 @@ def make(**over) -> JobDef:
         id="jd-1", name="alpha smoke", description="",
         product="alpha", test_scope="smoke", server="sandbox",
         action_kind=ActionKind.GH_ACTION.value, action_target="alpha_smoke.yml",
+        language=Language.PYTHON.value,
     )
     base.update(over)
     return JobDef(**base)

@@ -40,6 +40,7 @@ def a_job(**over) -> dict:
         "server": "sandbox",
         "action_kind": "test-server",
         "action_target": "any-runner",
+        "language": "python",
     }
     body.update(over)
     return body
@@ -300,3 +301,74 @@ def test_a_new_definition_has_an_empty_history_with_a_count(client: TestClient) 
     client.put("/admin/jobs/j1", json=a_job(), headers=AUTH)
     body = client.get("/admin/jobs/j1/runs", headers=AUTH).json()
     assert body == {"count": 0, "runs": []}
+
+
+# ── language (NEH-1192) ──────────────────────────────────────────────────────
+#
+# `language` chooses the workflow file. It is stored and NEVER dispatched --
+# workflow_dispatch caps at ten inputs and eight are already spent.
+
+
+def test_a_definition_records_the_language_it_was_given(client: TestClient) -> None:
+    """The positive control. Every refusal below is trivially true of an API
+    that rejects everything, so this has to pass first."""
+    created = client.put("/admin/jobs/j1", json=a_job(language="node"), headers=AUTH)
+    assert created.status_code == 201
+
+    read_back = client.get("/admin/jobs/j1", headers=AUTH)
+    assert read_back.json()["language"] == "node"
+
+
+def test_an_unknown_language_is_refused_and_the_message_names_the_real_ones(
+    client: TestClient,
+) -> None:
+    """Refused at SAVE, not at dispatch.
+
+    A bad language reaching dispatch surfaces as GitHub answering 422 for a
+    workflow that does not exist, which reads as a GitHub fault rather than a
+    definition one token wrong.
+    """
+    refused = client.put("/admin/jobs/j1", json=a_job(language="rust"), headers=AUTH)
+    assert refused.status_code == 422
+
+    detail = refused.text.lower()
+    assert "python" in detail and "node" in detail, (
+        "the refusal must name the allowed values -- an operator who cannot see "
+        "them guesses again"
+    )
+
+
+def test_an_absent_language_is_refused_rather_than_defaulted(client: TestClient) -> None:
+    """No default, deliberately.
+
+    A default is a guess about somebody else's repository, and it fails
+    silently: a Node product defaulted to python dispatches a workflow that is
+    simply absent, reported as a missing workflow rather than a wrong language.
+    """
+    body = a_job()
+    del body["language"]
+    assert client.put("/admin/jobs/j1", json=body, headers=AUTH).status_code == 422
+
+
+def test_the_workflow_is_derived_from_the_language_when_none_is_given(
+    client: TestClient,
+) -> None:
+    """The ordinary case: an operator picks a language, not a filename."""
+    body = a_job(action_kind="gh-action", language="node")
+    del body["action_target"]
+
+    assert client.put("/admin/jobs/j1", json=body, headers=AUTH).status_code == 201
+    assert client.get("/admin/jobs/j1", headers=AUTH).json()["action_target"] == (
+        "runtests-node.yml"
+    )
+
+
+def test_an_explicit_workflow_still_wins_over_the_derived_one(client: TestClient) -> None:
+    """A repo whose workflow is named something else must not be locked out."""
+    created = client.put(
+        "/admin/jobs/j1",
+        json=a_job(action_kind="gh-action", language="node", action_target="ci-tests.yml"),
+        headers=AUTH,
+    )
+    assert created.status_code == 201
+    assert client.get("/admin/jobs/j1", headers=AUTH).json()["action_target"] == "ci-tests.yml"
