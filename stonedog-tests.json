@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "project": "stonedog-testrunner",
+  "//fixtures": "tests/integration/fixture_suite/** and tests/sample/** are pytest suites this project RUNS as fixtures, not tests of this project. One of them fails on purpose. They are excluded so a deliberately-red suite is never counted as coverage — the single clearest reason tiers here cannot be inferred from paths.",
+  "//e2e": "Omitted rather than declared empty: nobody has decided whether this project wants an e2e tier, and claiming it has consciously chosen none would be a stronger statement than the truth.",
+  "tiers": {
+    "unit": {
+      "include": ["tests/unit/**/test_*.py"]
+    },
+    "integration": {
+      "include": [
+        "tests/integration/**/test_*.py",
+        "tests/conformance/**/test_*.py"
+      ],
+      "exclude": ["tests/integration/fixture_suite/**"]
+    }
+  }
+}
