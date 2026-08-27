@@ -165,7 +165,7 @@ store = open_store(os.environ.get('EDGE_DB_PATH') or os.environ['EDGE_DB_DSN'])
 store.save_job_def(JobDef(
     id='example-1', name='webapp smoke',
     product='webapp', test_scope='smoke', server='staging',
-    action_kind='test-server', action_target='any',
+    action_kind='test-server', action_target='any', language='python',
 ))
 print('seeded', store.count_job_defs(), 'job definition(s)')
 " >/dev/null 2>&1 || true

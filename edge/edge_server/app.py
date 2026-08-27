@@ -46,7 +46,8 @@ from stonedog_logs import configure as configure_logging
 from slack_runtests.runners.github import dispatch_workflow
 from slack_runtests.store import (
     NOT_DISPATCHED,
-    ActionKind, EnqueueResult, Job, JobDef, JobStore, SaveResult, StoreBusy,
+    ActionKind, EnqueueResult, Job, JobDef, JobStore, Language, SaveResult, StoreBusy,
+    default_action_target,
     StoreError, near_misses, open_store,
 )
 
@@ -786,6 +787,7 @@ def _job_def_json(job_def: JobDef) -> dict[str, Any]:
         "server": job_def.server,
         "action_kind": job_def.action_kind,
         "action_target": job_def.action_target,
+        "language": job_def.language,
         "trigger": job_def.trigger_text(),
         "created_at": job_def.created_at,
         "updated_at": job_def.updated_at,
@@ -912,6 +914,18 @@ async def put_job(job_def_id: str, request: Request) -> Response:
             status_code=422,
         )
 
+    # `action_target` DERIVES from the language when the caller leaves it out,
+    # and is honoured when given. Deriving covers the ordinary case -- a repo
+    # using the standard workflow names -- without locking out one that named
+    # its workflow something else.
+    #
+    # `default_action_target` returns "" for a language it does not know, so an
+    # unknown language falls through to validate_job_def and is refused THERE,
+    # with the allowed values named. Guessing a filename here would attach a
+    # plausible target to a definition about to be rejected anyway.
+    language = str(body.get("language", ""))
+    action_target = str(body.get("action_target", "")) or default_action_target(language)
+
     job_def = JobDef(
         id=job_def_id,
         name=str(body.get("name", "")),
@@ -920,7 +934,8 @@ async def put_job(job_def_id: str, request: Request) -> Response:
         test_scope=test_scope,
         server=server,
         action_kind=str(body.get("action_kind", "")),
-        action_target=str(body.get("action_target", "")),
+        action_target=action_target,
+        language=language,
     )
 
     store = _store(request)
