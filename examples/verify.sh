@@ -33,6 +33,13 @@ CHANNEL="C_VERIFY"
 failures=0
 checks=0
 
+# How many checks a complete run makes. Asserted at the end, because a run that
+# exited a path early and made FEWER checks than this would otherwise report
+# "0 failure(s)" and exit 0 -- a green over an empty set, which is the one
+# shape this repository exists to refuse. Bump it deliberately when adding a
+# check; that is the point.
+EXPECTED_CHECKS=14
+
 check() {
   checks=$((checks + 1))
   if [ "$2" = "$3" ]; then
@@ -158,7 +165,19 @@ compose embedded up -d --wait --wait-timeout 180 >/dev/null 2>&1 || true
 # edge owns its schema and creates it at startup; writing the database from
 # outside would race that. A versionable jobs file is phase 7 and will replace
 # this.
-compose embedded exec -T edge python -c "
+#
+# THE SEED IS A PRECONDITION, SO IT IS CHECKED OUT LOUD (NEH-1210).
+#
+# It used to end `>/dev/null 2>&1 || true`. When JobDef gained a required
+# field the python raised a TypeError, printed nothing, and the script carried
+# on -- so no definition was seeded and the failure surfaced THREE CHECKS LATER
+# as "a correctly signed command is ACCEPTED through the proxy", which points
+# at signing, the proxy and the gate. None of which was wrong.
+#
+# A precondition that cannot fail out loud sends every later failure to the
+# wrong place. Output and exit status are both kept, and both are asserted.
+set +e
+seed_out="$(compose embedded exec -T edge python -c "
 import os
 from slack_runtests.store import JobDef, open_store
 store = open_store(os.environ.get('EDGE_DB_PATH') or os.environ['EDGE_DB_DSN'])
@@ -168,7 +187,18 @@ store.save_job_def(JobDef(
     action_kind='test-server', action_target='any', language='python',
 ))
 print('seeded', store.count_job_defs(), 'job definition(s)')
-" >/dev/null 2>&1 || true
+" 2>&1)"
+seed_code=$?
+set -e
+
+check 'the example job definition seeds' 'zero' \
+  "$([ "$seed_code" -eq 0 ] && echo zero || echo nonzero)"
+contains 'the seed says how many definitions the store now holds' \
+  'seeded 1 job definition(s)' "$seed_out"
+if [ "$seed_code" -ne 0 ]; then
+  printf '        THE SEED FAILED, so every check below it is UNSOUND:\n%s\n' \
+    "$(printf '%s' "$seed_out" | tail -c 1000)"
+fi
 
 embedded_logs="$(compose embedded logs edge 2>&1 || true)"
 contains 'the sidecar opened a POSTGRES store' 'store ready: postgres' "$embedded_logs"
@@ -230,4 +260,11 @@ tampered="$(curl -sS --max-time 10 \
 contains 'a tampered body is REFUSED, by name' 'bad signature' "$tampered"
 
 printf '\n== %d check(s), %d failure(s) ==\n' "$checks" "$failures"
+
+# Both directions. A short run is unsound even with no failures; a run with
+# failures is a failure however many checks it made.
+if [ "$checks" -ne "$EXPECTED_CHECKS" ]; then
+  printf 'UNSOUND: expected %d check(s), ran %d\n' "$EXPECTED_CHECKS" "$checks" >&2
+  exit 1
+fi
 [ "$failures" -eq 0 ] || exit 1
