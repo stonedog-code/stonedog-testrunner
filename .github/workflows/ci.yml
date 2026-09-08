@@ -108,5 +108,14 @@ jobs:
       # It also carries the check that cannot be made anywhere else — a signed
       # Slack command sent THROUGH the example proxy, which fails if anything
       # in the path re-serialises the body.
+      # The verifier's own contract, checked BEFORE the verifier runs: a run
+      # that reports failures must exit non-zero, and a failed precondition
+      # must be named rather than surfacing three checks later as something
+      # else. Both were unasserted, and the second was false for months
+      # (NEH-1210). Runs against stub docker/curl, so it costs seconds and
+      # needs no images.
+      - name: Example tier (does verify.sh keep its own contract?)
+        run: bash examples/test_verify_contract.sh
+
       - name: Example tier (both deployments, up for real)
         run: bash examples/verify.sh
