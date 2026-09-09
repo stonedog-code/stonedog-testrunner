@@ -39,6 +39,38 @@ def _num(name: str, default: float) -> float:
         return default
 
 
+#: The settings an operator is shown, in the order they are shown (NEH-1191).
+#:
+#: These five decide every refusal the trigger surface can produce, and until
+#: now they appeared in NO surface at all -- so a `/testauto` refused as
+#: "product not allowed" could be told it was refused and never what is
+#: allowed. Naming them in one tuple keeps the report and the config from
+#: drifting: a setting added here without a reader below fails the test that
+#: walks this tuple.
+REPORTED_SETTINGS: tuple[str, ...] = (
+    "RUNTESTS_PRODUCTS",
+    "RUNTESTS_SERVERS",
+    "RUNTESTS_TEST_SCOPES",
+    "RUNTESTS_PRODUCT_REPOS",
+    "GITHUB_TOKEN",
+)
+
+#: The one setting whose VALUE may never be reported, only its presence.
+SECRET_SETTINGS: frozenset[str] = frozenset({"GITHUB_TOKEN"})
+
+
+def _declared(names: tuple[str, ...]) -> frozenset[str]:
+    """Which of `names` were PRESENT in the environment when config loaded.
+
+    Captured at load rather than read at request time, so the report describes
+    what this process actually started with. `_csv` cannot answer it: an unset
+    variable and one set to the empty string both produce an empty frozenset,
+    and those two refuse differently -- one is a deployment that forgot a
+    setting, the other is a deliberate "allow nothing".
+    """
+    return frozenset(name for name in names if name in os.environ)
+
+
 @dataclass(slots=True)
 class EdgeConfig:
     # ── Slack side (the public door) ─────────────────────────────────────────
@@ -74,12 +106,81 @@ class EdgeConfig:
         default_factory=lambda: _pairs("RUNTESTS_PRODUCT_REPOS")
     )
 
+    #: Which reported settings were present in the environment at load. See
+    #: `_declared` -- this is what lets the operator view say "not configured"
+    #: rather than showing an empty list and letting the reader guess.
+    declared: frozenset[str] = field(default_factory=lambda: _declared(REPORTED_SETTINGS))
+
     def repo_for(self, product: str) -> str:
         """The repository to dispatch `product` to, or the flat default."""
         return self.product_repos.get(product) or self.github_repo
 
     def grammar(self) -> "Grammar":
         return Grammar.of(self.allowed_products, self.allowed_servers, self.allowed_test_scopes)
+
+    def settings_report(self) -> list[dict[str, object]]:
+        """The five operator-facing settings, as THIS PROCESS loaded them.
+
+        NEH-1191. The point is that these decide every refusal and appeared in
+        no surface, so a rejected `/testauto` could say it was rejected and
+        never what would have been accepted.
+
+        ## What it reports, and what it must never report
+
+        `GITHUB_TOKEN` is reported as **present or absent, and nothing else** --
+        no value, no prefix, no length. A masked secret is still a secret
+        rendered into HTML, and a length is a real hint about which kind of
+        token it is. `test_config_report.py` asserts the token's value does not
+        appear anywhere in the serialised body, which is the assertion that has
+        to survive somebody later adding a "helpful" preview.
+
+        ## Empty and absent are different answers
+
+        `configured` is whether the variable was in the environment; `values` is
+        what it parsed to. So `configured: false` is a deployment that never set
+        it, and `configured: true` with an empty `values` is a deliberate "allow
+        nothing". Both refuse every command, and the operator needs to know
+        which one they are looking at -- the first is a mistake, the second is a
+        decision.
+
+        ## Effective, not intended
+
+        These come off the loaded `EdgeConfig`, so what is returned is what this
+        running process is enforcing. The secret in the store and a running edge
+        can disagree -- the environment is read once at start -- and the surface
+        that resolves that disagreement has to be the one reporting the running
+        value, or it just adds a third thing to be out of date.
+        """
+        lists: dict[str, frozenset[str]] = {
+            "RUNTESTS_PRODUCTS": self.allowed_products,
+            "RUNTESTS_SERVERS": self.allowed_servers,
+            "RUNTESTS_TEST_SCOPES": self.allowed_test_scopes,
+        }
+
+        report: list[dict[str, object]] = []
+        for name in REPORTED_SETTINGS:
+            entry: dict[str, object] = {"name": name, "configured": name in self.declared}
+
+            if name in SECRET_SETTINGS:
+                # `present` is not the same as `configured`: the variable can be
+                # set to the empty string, which is how a deployment "has" a
+                # token that authorises nothing.
+                entry["kind"] = "secret"
+                entry["present"] = bool(self.github_token)
+            elif name == "RUNTESTS_PRODUCT_REPOS":
+                # The dispatch blast radius, and the reason this is an
+                # operator-only surface. Sorted so two reads of an unchanged
+                # edge are byte-identical.
+                entry["kind"] = "map"
+                entry["entries"] = dict(sorted(self.product_repos.items()))
+                entry["count"] = len(self.product_repos)
+            else:
+                entry["kind"] = "list"
+                entry["values"] = sorted(lists[name])
+                entry["count"] = len(lists[name])
+
+            report.append(entry)
+        return report
 
     # ── the store ────────────────────────────────────────────────────────────
     #: The default, and the reason a standalone runner needs no database: a

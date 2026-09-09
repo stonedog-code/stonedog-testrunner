@@ -993,6 +993,39 @@ async def delete_job(job_def_id: str, request: Request) -> Response:
     return JSONResponse({"deleted": _store(request).delete_job_def(job_def_id)})
 
 
+@app.get("/admin/config")
+async def admin_config(request: Request) -> Response:
+    """The settings this process is enforcing, for the operator Settings view.
+
+    NEH-1191. The allowlists decide every refusal the trigger surface can
+    produce and they appeared in no surface at all, so a command refused as
+    "product not allowed" could be told that it was refused and never what
+    would have been accepted.
+
+    Reports what THIS PROCESS LOADED, not what the secret currently says. The
+    two can disagree -- the environment is read once at start, so an edited
+    secret and a running edge differ until a redeploy -- and a view that read
+    the secret instead would be a third thing to be out of date rather than the
+    one that settles it.
+
+    `GITHUB_TOKEN` is present/absent and nothing else. See `settings_report`.
+
+    404s like every other `/admin` route when the token is absent or wrong.
+    Which products, servers and repositories exist is exactly the
+    reconnaissance an unauthenticated caller should not have confirmed.
+    """
+    refused = _admin_or_404(request)
+    if refused is not None:
+        return refused
+
+    cfg = _config(request)
+    settings = cfg.settings_report()
+    # The count beside the list, as everywhere else here: a caller that
+    # mis-parses the body and finds nothing, and an edge that reported nothing,
+    # are otherwise the same answer.
+    return JSONResponse({"count": len(settings), "settings": settings})
+
+
 @app.get("/admin/fleet")
 async def fleet(request: Request) -> Response:
     """Who is enrolled, who is online, and what the queue looks like.
