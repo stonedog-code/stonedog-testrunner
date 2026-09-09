@@ -349,6 +349,7 @@ which is fine in a lab and not in production.
 | `GET` | `/edge/identity` | Anyone. It is a public key. |
 | `GET` | `/healthz` | Anything. Reveals nothing about configuration. |
 | `GET` | `/admin/fleet` | An operator with `EDGE_ADMIN_TOKEN`. `404` when unset. |
+| `GET` | `/admin/config` | An operator with `EDGE_ADMIN_TOKEN`. `404` when unset. The allowlists this process loaded; never the token's value. |
 
 Every `/runner/*` request carries `X-Runner-Id`, `X-Runner-Timestamp` and
 `X-Runner-Signature` — Ed25519 over `method · path · timestamp · sha256(body)`.
@@ -365,7 +366,15 @@ Every `/runner/*` **reply** carries `X-Edge-Timestamp` and `X-Edge-Signature`.
   signature gets a real `401`, because that sender is not a person to help.
 - **`/admin/fleet` 404s rather than 401s when no token is set.** Which internal
   machines exist and when they were last seen is reconnaissance; the endpoint
-  should not admit to existing.
+  should not admit to existing. `/admin/config` gets the same treatment for the
+  same reason — it names every product, server and repository this edge accepts.
+- **`/admin/config` reports the token as present or absent and NOTHING else.**
+  Not masked, not a prefix, not a length. A masked secret is still a secret
+  rendered into somebody's HTML, and a length says which kind of token it is.
+  It also reports *what this process loaded*, not what the secret says: the
+  environment is read once at start, so an edited secret and a running edge
+  disagree until a redeploy, and a view that read the secret would be a third
+  thing to be out of date rather than the one that settles it.
 - **Result ownership is in the SQL**, not in a checker function — `WHERE id=?
   AND runner_id=?`. A boundary enforced by the query cannot be bypassed by a
   code path that forgets to call it.
