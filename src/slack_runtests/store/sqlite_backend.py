@@ -517,11 +517,15 @@ class SqliteStore(JobStore):
             ).fetchall()
         return [dict(r) for r in rows]
 
-    def last_for(self, product: str) -> dict[str, Any] | None:
+    def last_for(self, product: str, *, server: str | None = None) -> dict[str, Any] | None:
+        sql = "SELECT * FROM jobs WHERE product=?"
+        params: list[Any] = [product]
+        if server is not None:
+            sql += " AND server=?"
+            params.append(server)
+        sql += " ORDER BY created_at DESC LIMIT 1"
         with self._conn() as conn:
-            row = conn.execute(
-                "SELECT * FROM jobs WHERE product=? ORDER BY created_at DESC LIMIT 1", (product,)
-            ).fetchone()
+            row = conn.execute(sql, tuple(params)).fetchone()
         return dict(row) if row else None
 
     def counts(self) -> dict[str, int]:

@@ -190,3 +190,77 @@ def test_gate_check_without_a_grammar_refuses_rather_than_allowing_anything() ->
     )
     assert not outcome.ok
     assert "allowlist" in str(outcome.message)
+
+
+# ── `results` no longer demands what it does not use (NEH-1166) ──────────────
+#
+# One parser served every action, so `results` inherited the whole trigger
+# grammar: `/testauto results -p billing` was refused for a missing `-s` that
+# the handler never read. Worse than the friction, naming the WRONG server
+# returned the same answer, which teaches people a flag matters when it does
+# not.
+#
+# These assert both halves: the flags are OPTIONAL for `results`, and they are
+# still REQUIRED for a run — dropping the requirement everywhere would let a
+# run dispatch against an unnamed server, which is the security boundary.
+
+
+def test_results_needs_only_a_product() -> None:
+    args = parse("results -p alpha", G)
+    assert args.action == "results"
+    assert args.product == "alpha"
+    # None, not a default: "the last run for this product, wherever it ran".
+    assert args.server is None
+    assert args.test_scope is None
+
+
+def test_results_still_accepts_the_flags_it_used_to_demand() -> None:
+    # The commonest way to type `results` is to edit a `run` command, so the
+    # long form must keep working rather than becoming an error.
+    args = parse("results -p alpha -s staging --test_scope full", G)
+    assert (args.action, args.server, args.test_scope) == ("results", "staging", "full")
+
+
+def test_results_still_allowlists_the_flags_it_accepts() -> None:
+    # Optional is not unvalidated. A server outside the allowlist is refused
+    # here exactly as it is for a run.
+    with pytest.raises(SlackArgError):
+        parse("results -p alpha -s prod", G)
+    with pytest.raises(SlackArgError):
+        parse("results -p ../../etc", G)
+
+
+def test_results_after_the_flags_is_still_results() -> None:
+    # `action` is a `nargs="?"` positional, so this is a legal spelling. A
+    # first-token scan would read the action as "run" and refuse the command
+    # for a missing `-s` — which is why `parse` asks argparse rather than
+    # guessing.
+    args = parse("-p alpha results", G)
+    assert args.action == "results"
+    assert args.server is None
+
+
+def test_a_run_still_requires_a_server_and_a_test_scope() -> None:
+    # The guard in both directions. If relaxing `results` had relaxed the
+    # grammar generally, a run would dispatch against a server nobody named.
+    with pytest.raises(SlackArgError):
+        parse("-p alpha --test_scope smoke", G)
+    with pytest.raises(SlackArgError):
+        parse("-p alpha -s sandbox", G)
+    with pytest.raises(SlackArgError):
+        parse("run -p alpha", G)
+
+
+def test_a_single_valued_allowlist_still_defaults_a_run_but_not_results() -> None:
+    run = parse("-p alpha", SINGLE)
+    assert (run.server, run.test_scope) == ("sandbox", "smoke")
+    # `results` does not adopt the default: an unnarrowed lookup is the honest
+    # default, and narrowing to the only server would be indistinguishable
+    # from not narrowing while implying it had.
+    res = parse("results -p alpha", SINGLE)
+    assert (res.server, res.test_scope) == (None, None)
+
+
+def test_product_is_required_for_results_too() -> None:
+    with pytest.raises(SlackArgError):
+        parse("results", G)

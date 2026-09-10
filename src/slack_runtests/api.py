@@ -23,7 +23,7 @@ from fastapi.responses import JSONResponse
 
 from . import gate
 from .authz import refuse_or_warn
-from .parsing import Grammar
+from .parsing import SCOPE_NOT_APPLIED, Grammar
 from stonedog_logs import configure as configure_logging
 from .config import Config, load
 from .runners import github as github_runner
@@ -181,14 +181,20 @@ async def commands(request: Request, background: BackgroundTasks) -> JSONRespons
     store = _store(request)
 
     if args.action == "results":
-        run = store.job(correlation_id) or store.last_for(args.product)
+        # `-s` NARROWS the answer when it is given, and is not required
+        # (NEH-1166). It used to be demanded and then discarded, so
+        # `results -p webapp -s staging` cheerfully answered about a run on
+        # `local` — the flag looked like a filter and was decoration.
+        run = store.job(correlation_id) or store.last_for(args.product, server=args.server)
         if not run:
-            return ephemeral(f"No recorded run for `{args.product}` yet.")
+            where = f" on `{args.server}`" if args.server else ""
+            return ephemeral(f"No recorded run for `{args.product}`{where} yet.")
         started = run.get("started_at") or run["created_at"]
         return ephemeral(
             f"Last `{run['product']}` run on `{run['server']}` — "
             f"id `{run['id']}`, started {int(time.time() - started)}s ago, "
             f"mode `{run['dispatch_mode'] or cfg.mode}`."
+            + (SCOPE_NOT_APPLIED if args.test_scope else "")
         )
 
     try:

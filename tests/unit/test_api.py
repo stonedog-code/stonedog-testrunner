@@ -210,3 +210,92 @@ def test_results_reports_the_last_run(client: TestClient) -> None:
 def test_results_with_no_prior_run_says_so(client: TestClient) -> None:
     response = post(client, form_body(text="results -p beta"))
     assert "No recorded run" in response.json()["text"]
+
+
+# ── `results` and the flags it used to demand (NEH-1166) ─────────────────────
+#
+# The `client` fixture above allows exactly ONE server, so `-s` is DEFAULTED
+# rather than required and this friction was invisible to every test in this
+# file. That is the measurement worth keeping: the existing
+# `test_results_reports_the_last_run` passed before this change and after it,
+# and could never have caught the defect.
+#
+# These use a TWO-server deployment, which is where `-s` becomes required.
+
+
+@pytest.fixture
+def multi_server_client(monkeypatch: pytest.MonkeyPatch, tmp_path) -> TestClient:
+    monkeypatch.delenv("SLACK_BOT_TOKEN", raising=False)
+    app = api.app
+    app.state.store = open_store(str(tmp_path / "multi.db"))
+    app.state.config = Config(
+        mode="github",
+        signing_secret=SECRET,
+        allowed_team="T_ALLOWED",
+        allowed_channels=frozenset({"C_ALLOWED"}),
+        allowed_users=frozenset({"U_ALLOWED"}),
+        allowed_products=frozenset({"alpha", "beta"}),
+        allowed_servers=frozenset({"sandbox", "staging"}),
+        allowed_test_scopes=frozenset({"smoke", "full"}),
+        github_repo="",
+        github_token="",
+    )
+    return TestClient(app)
+
+
+def test_results_needs_no_server_even_when_a_run_would(multi_server_client) -> None:
+    c = multi_server_client
+    # A run here genuinely requires -s and --test_scope …
+    refused = post(c, form_body(text="-p alpha", trigger_id="t-run-bad"))
+    assert "required" in refused.json()["text"] or "-s" in refused.json()["text"]
+
+    # … and `results` does not.
+    post(c, form_body(text="-p alpha -s sandbox --test_scope smoke", trigger_id="t-run"))
+    got = post(c, form_body(text="results -p alpha", trigger_id="t-res")).json()["text"]
+    assert "Last `alpha` run" in got
+
+
+def test_results_narrows_to_the_server_it_was_given(multi_server_client) -> None:
+    c = multi_server_client
+    post(c, form_body(text="-p alpha -s sandbox --test_scope smoke", trigger_id="t1"))
+    post(c, form_body(text="-p alpha -s staging --test_scope smoke", trigger_id="t2"))
+
+    # Unnarrowed: the newest run, whichever box.
+    any_ = post(c, form_body(text="results -p alpha", trigger_id="t3")).json()["text"]
+    assert "on `staging`" in any_
+
+    # Narrowed to the OLDER run's server. Before this change the flag was
+    # required and then discarded, so this returned `staging` — the same answer
+    # as the line above, which is what made the flag unfalsifiable.
+    old = post(c, form_body(text="results -p alpha -s sandbox", trigger_id="t4")).json()["text"]
+    assert "on `sandbox`" in old
+
+
+def test_results_for_a_server_with_no_runs_says_so_rather_than_falling_back(
+    multi_server_client,
+) -> None:
+    c = multi_server_client
+    post(c, form_body(text="-p alpha -s staging --test_scope smoke", trigger_id="t1"))
+    got = post(c, form_body(text="results -p alpha -s sandbox", trigger_id="t2")).json()["text"]
+    assert "No recorded run" in got
+    assert "sandbox" in got
+
+
+def test_a_test_scope_on_results_is_answered_rather_than_silently_ignored(
+    multi_server_client,
+) -> None:
+    # A run records its product and its server and NOT its test scope, so the
+    # flag CANNOT narrow the answer. Accepting it and saying nothing is the
+    # original defect; the reply says which scoping was applied instead.
+    c = multi_server_client
+    post(c, form_body(text="-p alpha -s sandbox --test_scope smoke", trigger_id="t1"))
+    got = post(
+        c, form_body(text="results -p alpha --test_scope full", trigger_id="t2")
+    ).json()["text"]
+    assert "Last `alpha` run" in got
+    assert "did not narrow this answer" in got
+
+    # And it is absent when the flag was not given — otherwise the note would
+    # be noise on every reply and nobody would read it.
+    quiet = post(c, form_body(text="results -p alpha", trigger_id="t3")).json()["text"]
+    assert "did not narrow this answer" not in quiet

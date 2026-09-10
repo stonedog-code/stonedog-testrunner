@@ -580,7 +580,21 @@ class JobStore(ABC):
         """
 
     @abstractmethod
-    def last_for(self, product: str) -> dict[str, Any] | None: ...
+    def last_for(self, product: str, *, server: str | None = None) -> dict[str, Any] | None:
+        """The newest run for `product`, optionally narrowed to one server.
+
+        `server` is None by default and that is the honest default: "how did the
+        last billing run go" usually means the last one, whichever box it was.
+
+        IT IS NOT NARROWED BY TEST SCOPE, AND IT CANNOT BE. The `jobs` table
+        records no `test_scope` column — a run knows its product and its server
+        and nothing else about the trigger that produced it. So `--test_scope`
+        can only be answered through the job DEFINITION, which is a different
+        lookup (`runs_for_job_def`). Accepting the flag here and quietly
+        returning an unnarrowed answer is exactly the defect NEH-1166 named:
+        naming the wrong value returns the same result, which teaches people the
+        flag matters when it does not.
+        """
 
     @abstractmethod
     def counts(self) -> dict[str, int]: ...
