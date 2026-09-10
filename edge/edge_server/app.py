@@ -42,6 +42,7 @@ from fastapi.responses import JSONResponse, Response
 
 from slack_runtests import gate, identity
 from slack_runtests.authz import refuse_or_warn
+from slack_runtests.parsing import SCOPE_NOT_APPLIED
 from stonedog_logs import configure as configure_logging
 from slack_runtests.runners.github import dispatch_workflow
 from slack_runtests.store import (
@@ -299,10 +300,15 @@ async def slack_commands(request: Request, background: BackgroundTasks) -> JSONR
     job_id = uuid.uuid5(uuid.NAMESPACE_URL, trigger).hex[:12]
 
     if args.action == "results":
-        record = store.job(job_id) or store.last_for(args.product)
+        # `-s` NARROWS the answer when it is given, and is not required
+        # (NEH-1166). It used to be demanded and then discarded, so
+        # `results -p webapp -s staging` cheerfully answered about a run on
+        # `local` — the flag looked like a filter and was decoration.
+        record = store.job(job_id) or store.last_for(args.product, server=args.server)
         if not record:
-            return ephemeral(f"No recorded run for `{args.product}` yet.")
-        return ephemeral(_describe(record))
+            where = f" on `{args.server}`" if args.server else ""
+            return ephemeral(f"No recorded run for `{args.product}`{where} yet.")
+        return ephemeral(_describe(record) + (SCOPE_NOT_APPLIED if args.test_scope else ""))
 
     # ── resolve the command to a JOB DEFINITION (A2.2.2) ─────────────────────
     #

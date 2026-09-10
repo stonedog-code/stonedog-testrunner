@@ -527,12 +527,15 @@ class PostgresStore(JobStore):
             )
             return [dict(r) for r in cur.fetchall()]
 
-    def last_for(self, product: str) -> dict[str, Any] | None:
+    def last_for(self, product: str, *, server: str | None = None) -> dict[str, Any] | None:
+        sql = "SELECT * FROM jobs WHERE product=%s"
+        params: list[Any] = [product]
+        if server is not None:
+            sql += " AND server=%s"
+            params.append(server)
+        sql += " ORDER BY created_at DESC LIMIT 1"
         with self._cursor() as cur:
-            cur.execute(
-                "SELECT * FROM jobs WHERE product=%s ORDER BY created_at DESC LIMIT 1",
-                (product,),
-            )
+            cur.execute(sql, tuple(params))
             return cur.fetchone()
 
     def counts(self) -> dict[str, int]:

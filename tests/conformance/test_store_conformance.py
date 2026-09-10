@@ -519,6 +519,34 @@ def test_last_for_a_product_is_the_most_recent_one(store: JobStore, make_job) ->
     assert store.last_for("nothing-like-this") is None
 
 
+def test_last_for_narrows_to_a_server_when_one_is_named(store: JobStore, make_job) -> None:
+    """NEH-1166: `-s` used to be REQUIRED by the parser and then discarded here.
+
+    `results -p webapp -s dev` answered about the `staging` run, and the flag
+    looked like a filter. Naming the wrong server returning the right answer is
+    worse than not accepting the flag at all, because it is unfalsifiable from
+    the reply.
+
+    Both directions in one test: named narrows, unnamed does not.
+    """
+    store.enqueue(make_job("on-dev", server="dev"), now=1_000.0)
+    store.enqueue(make_job("on-staging", server="staging"), now=2_000.0)
+
+    # Named: the OLDER run, because it is the newest on THAT server. If the
+    # argument were ignored this would be "on-staging" — the same answer the
+    # unnarrowed call gives, which is why that call is asserted too.
+    assert store.last_for("webapp", server="dev")["id"] == "on-dev"
+    assert store.last_for("webapp", server="staging")["id"] == "on-staging"
+
+    # Unnamed: unchanged. "How did the last webapp run go" means the last one.
+    assert store.last_for("webapp")["id"] == "on-staging"
+
+    # A server with no runs is None, not a fallback to the newest anywhere.
+    # A fallback would make the narrowed call incapable of ever returning None,
+    # so the narrowing could never be observed to have failed.
+    assert store.last_for("webapp", server="sandbox") is None
+
+
 # ── job definitions (A2.2) ───────────────────────────────────────────────────
 #
 # A `Job` above is a RUN. A `JobDef` here is a DEFINITION that produces runs.

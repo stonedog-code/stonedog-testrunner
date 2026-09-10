@@ -44,6 +44,21 @@ outside the allowlist. Both are worse than asking.
 The one exception is an allowlist with exactly ONE value, where the default is
 that value: there is nothing to be ambiguous about, and requiring people to name
 the only possible answer is friction with no safety attached.
+
+`results` DOES NOT INHERIT THE TRIGGER GRAMMAR (NEH-1166)
+
+One parser served every action, so asking "how did the last billing run go"
+was refused for a missing `-s` the handler never read. The friction was the
+smaller half. The larger half is that naming the WRONG server returned the same
+answer, so the flag looked like a filter and was decoration — and a filter you
+cannot observe failing is worse than no filter.
+
+`-s` is now optional for `results` and, when given, genuinely narrows the
+lookup. `--test_scope` is optional too and CANNOT narrow it, because the `jobs`
+table records a run's product and server and no test scope; rather than
+accepting it silently, the reply says so. Both flags are still allowlisted when
+present, and both are still REQUIRED for a run — that is the security boundary,
+and relaxing it for `results` must not relax it generally.
 """
 
 from __future__ import annotations
@@ -61,6 +76,19 @@ from typing import Iterable
 EXPRESSION = re.compile(r"^[A-Za-z0-9_ -]{1,80}$")
 
 ACTIONS = ("run", "results")
+
+#: Appended to a `results` reply when `--test_scope` was supplied.
+#:
+#: The `jobs` table records a run's product and server and NOT its test scope,
+#: so the flag cannot narrow the answer. Saying so is the point: the defect
+#: NEH-1166 named is that naming the wrong value returned the same answer, which
+#: teaches people a flag matters when it does not. The flag is accepted rather
+#: than refused because `results` is most often typed by editing a `run` command
+#: that already carries it.
+SCOPE_NOT_APPLIED = (
+    "\n_A run records its product and its server, not a test scope, "
+    "so `--test_scope` did not narrow this answer._"
+)
 
 
 class SlackArgError(Exception):
@@ -127,7 +155,12 @@ class _Parser(argparse.ArgumentParser):
         raise SlackArgError(message or "bad command")
 
 
-def build_parser(grammar: Grammar) -> _Parser:
+def build_parser(grammar: Grammar, *, require_trigger: bool = True) -> _Parser:
+    """The command grammar.
+
+    `require_trigger=False` drops the requirement on `-s` and `--test_scope`.
+    It exists for `results`, which needs neither — see `parse` (NEH-1166).
+    """
     parser = _Parser(prog="/runtests", add_help=False)
     parser.add_argument("action", nargs="?", default="run", choices=ACTIONS)
     parser.add_argument("-p", "--product", required=True, choices=grammar.products)
@@ -135,21 +168,33 @@ def build_parser(grammar: Grammar) -> _Parser:
     # Required unless there is exactly one allowed value — see the module
     # docstring. `required` and `default` are mutually exclusive in argparse, so
     # this is one branch rather than a clever expression.
-    if len(grammar.servers) == 1:
+    #
+    # ...and never required when the action does not USE them. A flag that is
+    # demanded and then ignored teaches people it matters when it does not, and
+    # naming the wrong one still returns the same answer, which is worse than
+    # asking for nothing.
+    if not require_trigger:
+        parser.add_argument("-s", "--server", default=None, choices=grammar.servers)
+        parser.add_argument("--test_scope", default=None, choices=grammar.test_scopes)
+    elif len(grammar.servers) == 1:
         parser.add_argument("-s", "--server", default=grammar.servers[0],
                             choices=grammar.servers)
+        _add_test_scope(parser, grammar)
     else:
         parser.add_argument("-s", "--server", required=True, choices=grammar.servers)
+        _add_test_scope(parser, grammar)
 
+    parser.add_argument("-k", "--select", default=None)
+    parser.add_argument("-m", "--marker", default=None)
+    return parser
+
+
+def _add_test_scope(parser: _Parser, grammar: Grammar) -> None:
     if len(grammar.test_scopes) == 1:
         parser.add_argument("--test_scope", default=grammar.test_scopes[0],
                             choices=grammar.test_scopes)
     else:
         parser.add_argument("--test_scope", required=True, choices=grammar.test_scopes)
-
-    parser.add_argument("-k", "--select", default=None)
-    parser.add_argument("-m", "--marker", default=None)
-    return parser
 
 
 def parse(text: str, grammar: Grammar) -> argparse.Namespace:
@@ -173,7 +218,26 @@ def parse(text: str, grammar: Grammar) -> argparse.Namespace:
             "configured, so no command can be authorised"
         )
 
-    args = build_parser(grammar).parse_args(shlex.split(text))
+    tokens = shlex.split(text)
+
+    # TWO PASSES, and the first one is not a guess at token positions.
+    #
+    # `results` needs no server and no test scope, so requiring them is friction
+    # with nothing attached (NEH-1166). But which action a command names is
+    # argparse's answer to give, not a scan's: `action` is a `nargs="?"`
+    # positional, so `-p billing results` is a legal spelling and
+    # `tokens[0] == "results"` gets it wrong. Parse permissively, read the
+    # action argparse resolved, and only then re-parse under the strict grammar
+    # if this really is a run.
+    #
+    # The permissive pass still enforces `-p` and every `choices` allowlist, so
+    # nothing reaches the second pass that the first would have refused, and a
+    # bad value is reported by the same message either way.
+    peek = build_parser(grammar, require_trigger=False).parse_args(tokens)
+    if peek.action == "results":
+        args = peek
+    else:
+        args = build_parser(grammar).parse_args(tokens)
     for name in ("select", "marker"):
         value = getattr(args, name)
         if value is not None and not EXPRESSION.match(value):
